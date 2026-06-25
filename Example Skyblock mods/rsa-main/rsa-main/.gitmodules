@@ -1,0 +1,4 @@
+[submodule "rsm"]
+	path = rsm
+	url = https://github.com/rs-mod/rsm.git
+	branch = main

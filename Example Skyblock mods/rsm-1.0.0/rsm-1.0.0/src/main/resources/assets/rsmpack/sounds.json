@@ -1,0 +1,14 @@
+{
+  "win": {
+    "subtitle": "sound.rsm.win",
+    "sounds": [
+      "rsmpack:win"
+    ]
+  },
+  "bell": {
+    "subtitle": "sound.rsm.bell",
+    "sounds": [
+      "rsmpack:bell"
+    ]
+  }
+}

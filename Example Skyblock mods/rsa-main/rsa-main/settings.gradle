@@ -1,0 +1,24 @@
+pluginManagement {
+    repositories {
+        maven {
+            name = 'Fabric'
+            url = 'https://maven.fabricmc.net/'
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+rootProject.name = 'rsa'
+
+def rsmDir = file('rsm')
+if (!rsmDir.exists()) {
+    throw new GradleException("Missing required submodule 'rsm'. Run: git submodule update --init --recursive")
+}
+
+def rsmJar = file('rsm/build/libs/rsm-1.0.0.jar')
+if (!rsmJar.exists()) {
+    throw new GradleException("Missing required file '${rsmJar}'. Run: cd rsm && ./gradlew --no-daemon remapJar")
+}
+
+includeBuild(rsmDir)

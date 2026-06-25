@@ -1,0 +1,27 @@
+{
+  "required": true,
+  "package": "com.ricedotwho.rsa.mixins",
+  "compatibilityLevel": "JAVA_21",
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": [
+    "ConnectionAccessor",
+    "MixinClientConnection",
+    "MixinClipContext",
+    "MixinLivingEntity",
+    "MixinLowPriorityConnection",
+    "MixinMinecraft",
+    "MixinMultiPlayerGameMode",
+    "MixinPlayer"
+  ],
+  "client": [
+    "MixinClientPacketListener",
+    "MixinDeltaTracker",
+    "MixinEntityRenderer",
+    "MixinGameRenderer",
+    "MixinLevelRenderer",
+    "MixinTitleScreen",
+    "MixinVisGraph"
+  ]
+}

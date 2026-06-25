@@ -1,0 +1,37 @@
+{
+  "required": true,
+  "package": "com.ricedotwho.rsm.mixins",
+  "compatibilityLevel": "JAVA_21",
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": [
+    "MixinClientConnection",
+    "MixinDyedItemColor",
+    "MixinEntity",
+    "MixinServerConnection",
+    "accessor.AccessorClientboundSectionBlocksUpdatePacket",
+    "accessor.AccessorServerboundInteractPacket"
+  ],
+  "client": [
+    "MixinAbstractContainerScreen",
+    "MixinCamera",
+    "MixinChatComponent",
+    "MixinClientPacketListener",
+    "MixinCommandSuggestions",
+    "MixinEntityRenderer",
+    "MixinFont",
+    "MixinGameRenderer",
+    "MixinGui",
+    "MixinItemInHandsRenderer",
+    "MixinItemStack",
+    "MixinKeyboardHandler",
+    "MixinKeyboardInput",
+    "MixinLocalPlayer",
+    "MixinMinecraft",
+    "MixinMouseHandler",
+    "accessor.AccessorBeaconBeam",
+    "accessor.AccessorKeyMapping",
+    "accessor.LocalPlayerAccessor"
+  ]
+}

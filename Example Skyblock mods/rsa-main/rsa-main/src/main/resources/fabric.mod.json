@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "rsa",
+  "version": "${version}",
+  "name": "rsa",
+  "description": "RSM addon.",
+  "authors": [
+    "ricedotwho"
+  ],
+  "contact": {
+    "sources": "https://github.com/rs-mod/rsa",
+    "issues": "https://github.com/rs-mod/rsa/issues"
+  },
+  "license": "MIT",
+  "icon": "assets/rsa/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "rsm": [
+      "com.ricedotwho.rsa.RSA"
+    ]
+  },
+  "mixins": [
+    "rsa.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.17.3",
+    "minecraft": "~1.21.10",
+    "java": ">=21",
+    "fabric-api": "*",
+    "rsm": "*"
+  }
+}
