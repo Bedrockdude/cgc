@@ -29,7 +29,9 @@ public class ClientPacketListenerMixin {
 
 	@Inject(method = "handleSystemChat", at = @At("HEAD"))
 	private void cgc$onSystemChat(ClientboundSystemChatPacket packet, CallbackInfo ci) {
-		if (!packet.overlay()) {
+		if (packet.overlay()) {
+			CgcModules.actionBarMessage(packet.content().getString());
+		} else {
 			CgcModules.chatMessage(packet.content().getString());
 		}
 	}

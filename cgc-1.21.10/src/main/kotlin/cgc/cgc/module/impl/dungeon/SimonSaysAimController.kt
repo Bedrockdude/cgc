@@ -112,7 +112,7 @@ class SimonSaysAimController {
 		val perpendicular = perpendicular(motionDirection, random.sign())
 		val overshootDirection = overshootDirection(motionDirection, perpendicular, overshootAmount, band, random)
 		val curveAmount = when {
-			mode == AimMode.PRACTICE -> 0.0
+			mode == AimMode.PRACTICE -> practiceCurveAmount(angularDistance, band, planSettings, random)
 			practiceReturnMode -> returnCurveAmount(angularDistance, band, planSettings, random)
 			else -> curveAmount(angularDistance, band, planSettings, random)
 		}
@@ -268,7 +268,7 @@ class SimonSaysAimController {
 	private fun movementProgress(plan: AimPlan, rawProgress: Double): Double {
 		val progress = rawProgress.coerceIn(0.0, 1.0)
 		if (plan.mode == AimMode.PRACTICE) {
-			return lerp(progress, smootherStep(progress), 0.18).coerceIn(0.0, 1.0)
+			return lerp(progress, smootherStep(progress), 0.32).coerceIn(0.0, 1.0)
 		}
 		if (plan.mode == AimMode.PRACTICE_RETURN) {
 			return lerp(progress, easeOutPower(progress, 1.18), 0.22).coerceIn(0.0, 1.0)
@@ -507,10 +507,10 @@ class SimonSaysAimController {
 
 	private fun practiceDurationScale(band: AimDistanceBand): Double =
 		when (band) {
-			AimDistanceBand.TINY -> 0.78
-			AimDistanceBand.SMALL -> 0.68
-			AimDistanceBand.MEDIUM -> 0.58
-			AimDistanceBand.LARGE -> 0.50
+			AimDistanceBand.TINY -> 0.9
+			AimDistanceBand.SMALL -> 0.8
+			AimDistanceBand.MEDIUM -> 0.68
+			AimDistanceBand.LARGE -> 0.58
 		}
 
 	private fun overshootAmount(
@@ -600,6 +600,24 @@ class SimonSaysAimController {
 		val base = curveAmount(distance, band, settings, random)
 		return (base * random.between(0.42, 0.68))
 			.coerceAtMost(distance * MAX_RETURN_CURVE_DISTANCE_FRACTION)
+	}
+
+	private fun practiceCurveAmount(
+		distance: Double,
+		band: AimDistanceBand,
+		settings: AimSettings,
+		random: Random
+	): Double {
+		val base = when (band) {
+			AimDistanceBand.TINY -> lerp(0.0, 0.010, (distance / TINY_DISTANCE).coerceIn(0.0, 1.0))
+			AimDistanceBand.SMALL -> lerp(0.045, 0.110, ((distance - TINY_DISTANCE) / (SMALL_DISTANCE - TINY_DISTANCE)).coerceIn(0.0, 1.0))
+			AimDistanceBand.MEDIUM -> lerp(0.118, 0.190, ((distance - SMALL_DISTANCE) / (MEDIUM_DISTANCE - SMALL_DISTANCE)).coerceIn(0.0, 1.0))
+			AimDistanceBand.LARGE -> lerp(0.198, 0.285, ((distance - MEDIUM_DISTANCE) / LARGE_DISTANCE_RANGE).coerceIn(0.0, 1.0))
+		}
+		val randomScale = random.between(0.78, 1.22)
+		val randomnessScale = 0.64 + settings.randomness * 0.36
+		return (base * randomScale * randomnessScale)
+			.coerceAtMost(distance * MAX_PRACTICE_CURVE_DISTANCE_FRACTION)
 	}
 
 	private fun curvePeak(band: AimDistanceBand, random: Random): Double =
@@ -897,6 +915,7 @@ class SimonSaysAimController {
 		private const val MAX_OVERSHOOT_DISTANCE_FRACTION = 0.34
 		private const val MAX_CURVE_DISTANCE_FRACTION = 0.08
 		private const val MAX_RETURN_CURVE_DISTANCE_FRACTION = 0.036
+		private const val MAX_PRACTICE_CURVE_DISTANCE_FRACTION = 0.068
 		private const val MIN_DURATION_MS = 24L
 		private const val MAX_DURATION_MS = 360L
 		private const val MIN_APPROACH_MS = 22L

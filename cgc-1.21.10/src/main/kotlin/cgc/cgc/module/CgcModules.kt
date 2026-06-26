@@ -57,6 +57,15 @@ object CgcModules {
 	}
 
 	@JvmStatic
+	fun actionBarMessage(message: String) {
+		manager.all()
+			.asSequence()
+			.filter { it.enabled }
+			.filterIsInstance<ActionBarMessageModule>()
+			.forEach { it.onActionBarMessage(message) }
+	}
+
+	@JvmStatic
 	fun blockChange(pos: BlockPos, newState: BlockState) {
 		val oldState = Minecraft.getInstance().level?.getBlockState(pos)
 		manager.all()

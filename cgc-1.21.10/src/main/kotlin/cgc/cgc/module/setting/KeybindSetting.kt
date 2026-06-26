@@ -14,7 +14,9 @@ class KeybindSetting(
 	override var value: Keybind = keybind
 
 	init {
-		value.setRunnable(action)
+		if (action != null) {
+			value.setRunnable(action)
+		}
 		defaultValue = keybind
 	}
 

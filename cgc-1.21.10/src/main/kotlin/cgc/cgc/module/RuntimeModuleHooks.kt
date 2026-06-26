@@ -13,6 +13,10 @@ interface ChatMessageModule {
 	fun onChatMessage(message: String)
 }
 
+interface ActionBarMessageModule {
+	fun onActionBarMessage(message: String)
+}
+
 interface BlockChangeModule {
 	fun onBlockChange(pos: BlockPos, oldState: BlockState?, newState: BlockState)
 }

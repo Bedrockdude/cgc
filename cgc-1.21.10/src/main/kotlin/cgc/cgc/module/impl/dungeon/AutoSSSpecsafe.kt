@@ -6,6 +6,7 @@ import cgc.cgc.data.Phase7
 import cgc.cgc.location.Floor
 import cgc.cgc.location.Island
 import cgc.cgc.location.Location
+import cgc.cgc.module.ActionBarMessageModule
 import cgc.cgc.module.BlockChangeModule
 import cgc.cgc.module.CgcModule
 import cgc.cgc.module.ChatMessageModule
@@ -48,19 +49,14 @@ class AutoSSSpecsafe : CgcModule(
 	category = ModuleCategory.DUNGEONS,
 	description = "Automatically solves spectator safe Simon Says.",
 	defaultEnabled = false
-), ClientTickModule, WorldRenderStartModule, WorldRenderExtractModule, HudRenderModule, WorldLoadModule, ChatMessageModule, BlockChangeModule {
+), ClientTickModule, WorldRenderStartModule, WorldRenderExtractModule, HudRenderModule, WorldLoadModule, ChatMessageModule, ActionBarMessageModule, BlockChangeModule {
 	private val resetKey = KeybindSetting("Reset Key", Keybind(action = this::SSR))
 	private val autoStart = BooleanSetting("Auto start", true)
+	private val autoRestartSs = BooleanSetting("Auto restart ss", false)
 	private val forceSkyblock = BooleanSetting("Force Skyblock", false)
 	private val autoStartDelay = NumberSetting("Auto start delay (MS)", 10.0, 500.0, 120.0, 10.0)
 	private val aimSpeed = NumberSetting("Aim Speed", 0.5, 2.0, 1.0, 0.05, "x")
-	private val aimRandomness = NumberSetting("Aim Randomness", 0.0, 1.0, 0.45, 0.05)
-	private val aimTolerance = NumberSetting("Aim Tolerance", 0.0, 0.45, 0.08, 0.01)
-	private val overshootStrength = NumberSetting("Overshoot Strength", 0.0, 1.5, 1.0, 0.05)
-	private val microCorrection = NumberSetting("Micro Correction", 0.0, 1.0, 0.45, 0.05)
-	private val clickDelayMin = NumberSetting("Click Delay Min", 5.0, 150.0, 24.0, 1.0, " ms")
-	private val clickDelayMax = NumberSetting("Click Delay Max", 10.0, 180.0, 44.0, 1.0, " ms")
-	private val donePopup = BooleanSetting("Done Popup", true)
+	private val donePopup = BooleanSetting("Done Popup", false)
 	private val fillColor = ColourSetting("Button Fill Color", Colour(85, 255, 85))
 	private val outlineColor = ColourSetting("Button Outline Color", Colour(0, 170, 0))
 
@@ -79,11 +75,14 @@ class AutoSSSpecsafe : CgcModule(
 	private var startAimPoint: Vec3? = null
 	private var targetIsStart = false
 	private var targetPreAim = false
+	private var targetOpeningPreAim = false
 	private var targetPractice = false
 	private var targetPracticeReturningToStart = false
 	private var targetPracticeIndex = 0
 	private var targetWaitingForButton = false
 	private var preAimButton: BlockPos? = null
+	private var openingPreAimButton: BlockPos? = null
+	private var openingPreAimAt = 0L
 	private var startClicksRemaining = 0
 	private var nextStartClickAt = 0L
 	private var patternSettledAt = 0L
@@ -94,20 +93,16 @@ class AutoSSSpecsafe : CgcModule(
 	private var practicePassesCompleted = 0
 	private var practiceMaxPasses = 0
 	private var practiceResumeAt = 0L
+	private var autoRestartAt = 0L
 
 	init {
 		registerProperty(
 			resetKey,
 			autoStart,
+			autoRestartSs,
 			forceSkyblock,
 			autoStartDelay,
 			aimSpeed,
-			aimRandomness,
-			aimTolerance,
-			overshootStrength,
-			microCorrection,
-			clickDelayMin,
-			clickDelayMax,
 			donePopup,
 			fillColor,
 			outlineColor
@@ -116,7 +111,13 @@ class AutoSSSpecsafe : CgcModule(
 
 	override fun onClientTick(client: Minecraft) {
 		if (!areaCheck() || client.player == null || client.level == null) {
+			clearAutoRestart()
 			clearTarget()
+			return
+		}
+
+		val now = System.currentTimeMillis()
+		if (tickAutoRestart(now)) {
 			return
 		}
 
@@ -133,11 +134,14 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
-		val now = System.currentTimeMillis()
 		if (startClicksRemaining > 0) {
 			if (now >= nextStartClickAt) {
 				beginLookClick(startButtonPos(), true)
 			}
+			return
+		}
+
+		if (tickOpeningPreAim(client, now)) {
 			return
 		}
 
@@ -231,6 +235,11 @@ class AutoSSSpecsafe : CgcModule(
 				start()
 			}
 		}
+		handlePossibleSimonSaysFailure(message)
+	}
+
+	override fun onActionBarMessage(message: String) {
+		handlePossibleSimonSaysFailure(message)
 	}
 
 	override fun onBlockChange(pos: BlockPos, oldState: BlockState?, newState: BlockState) {
@@ -251,7 +260,7 @@ class AutoSSSpecsafe : CgcModule(
 				allButtons.removeAt(0)
 			}
 
-			if (targetPreAim && button == preAimButton && !canPracticeCurrentSequence()) {
+			if (targetPreAim && !targetOpeningPreAim && button == preAimButton && !canPracticeCurrentSequence()) {
 				clicks.clear()
 				allButtons.clear()
 				clicks.add(button)
@@ -267,12 +276,13 @@ class AutoSSSpecsafe : CgcModule(
 				state = 0
 				clicks.add(button)
 				allButtons.add(Vec3.atLowerCornerOf(button))
-				if (targetPreAim && button == clicks.first()) {
+				if (targetPreAim && !targetOpeningPreAim && button == clicks.first()) {
 					targetPreAim = false
 					targetWaitingForButton = true
 				}
 			}
 
+			scheduleOpeningPreAim()
 			continuePracticeDuringPatternDisplay(Minecraft.getInstance())
 		}
 	}
@@ -343,7 +353,7 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		if (targetPractice) {
-			if (aimResult.finished) {
+			if (shouldAdvancePracticeTarget(aimResult)) {
 				beginNextPracticeButton(client)
 			}
 			return
@@ -402,6 +412,7 @@ class AutoSSSpecsafe : CgcModule(
 		targetButton = button
 		targetIsStart = startButton
 		targetPreAim = false
+		targetOpeningPreAim = false
 		targetPractice = false
 		targetWaitingForButton = false
 		targetAimPoint = if (startButton && startAimPoint != null) startAimPoint else getAimPoint(level, button)
@@ -434,6 +445,7 @@ class AutoSSSpecsafe : CgcModule(
 
 		val clicked = button
 		val clickedStart = targetIsStart
+		clearAutoRestart()
 		lastClickTime = System.currentTimeMillis()
 		currentClickDelayMs = randomClickDelayMs()
 		clickedButton = Vec3.atLowerCornerOf(clicked)
@@ -506,6 +518,79 @@ class AutoSSSpecsafe : CgcModule(
 		targetPreAim = true
 		preAimButton = first
 		return true
+	}
+
+	private fun scheduleOpeningPreAim() {
+		val first = openingFirstButtonCandidate() ?: return
+		if (openingPreAimButton == first || targetOpeningPreAim && targetButton == first) {
+			return
+		}
+
+		if (targetOpeningPreAim) {
+			clearTarget()
+		}
+
+		openingPreAimButton = first
+		openingPreAimAt = System.currentTimeMillis() + FIRST_PATTERN_PRE_AIM_REACTION_MS
+	}
+
+	private fun tickOpeningPreAim(client: Minecraft, now: Long): Boolean {
+		val pending = openingPreAimButton ?: return false
+		val currentFirst = openingFirstButtonCandidate()
+		if (currentFirst == null) {
+			clearOpeningPreAim()
+			return false
+		}
+		if (currentFirst != pending) {
+			scheduleOpeningPreAim()
+			return true
+		}
+		if (targetButton != null) {
+			return false
+		}
+		if (now < openingPreAimAt) {
+			return true
+		}
+
+		clearOpeningPreAim()
+		return beginOpeningPreAim(client, pending)
+	}
+
+	private fun beginOpeningPreAim(client: Minecraft, button: BlockPos): Boolean {
+		val player = client.player ?: return false
+		val level = client.level ?: return false
+
+		targetButton = button
+		targetIsStart = false
+		targetPreAim = true
+		targetOpeningPreAim = true
+		targetPractice = false
+		targetWaitingForButton = false
+		preAimButton = button
+		targetAimPoint = if (level.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
+			getAimPoint(level, button)
+		} else {
+			getPracticeAimPoint(button)
+		}
+		aimController.start(player, targetAimPoint!!, getAimSettings(), AimMode.PRE_AIM)
+		return true
+	}
+
+	private fun openingFirstButtonCandidate(): BlockPos? {
+		if (!doingSS || completedSequenceCount != 0 || state != 0 || clicks.isEmpty()) {
+			return null
+		}
+
+		return if (doneFirst) {
+			clicks.firstOrNull()
+		} else {
+			clicks.getOrNull(1)
+		}
+	}
+
+	private fun clearOpeningPreAim() {
+		openingPreAimButton = null
+		openingPreAimAt = 0L
 	}
 
 	private fun beginPracticeSequence(client: Minecraft): Boolean {
@@ -606,6 +691,32 @@ class AutoSSSpecsafe : CgcModule(
 	private fun desiredPracticePasses(): Int =
 		1
 
+	private fun shouldAdvancePracticeTarget(aimResult: AimUpdateResult): Boolean {
+		if (aimResult.finished) {
+			return true
+		}
+		if (targetPracticeReturningToStart || practiceButtons.size <= 1) {
+			return false
+		}
+
+		val plan = aimController.currentPlan() ?: return false
+		if (plan.mode != AimMode.PRACTICE) {
+			return false
+		}
+
+		val elapsedMs = max(0L, System.currentTimeMillis() - plan.startedAtMs)
+		val progress = (elapsedMs.toDouble() / max(1L, plan.durationMs)).coerceIn(0.0, 1.0)
+		val finalPatternButton = targetPracticeIndex >= practiceButtons.lastIndex
+		return progress >= practicePassThroughProgress(plan, finalPatternButton)
+	}
+
+	private fun practicePassThroughProgress(plan: AimPlan, finalPatternButton: Boolean): Double {
+		val distanceScale = (plan.angularDistance / MEDIUM_PRACTICE_TURN_DISTANCE).coerceIn(0.0, 1.0)
+		val seedJitter = (((plan.seed and Long.MAX_VALUE) % 1000L).toDouble() / 999.0 - 0.5) * 0.06
+		val finalButtonHold = if (finalPatternButton) 0.06 else 0.0
+		return (0.82 - distanceScale * 0.16 + seedJitter + finalButtonHold).coerceIn(0.62, 0.90)
+	}
+
 	private fun beginNextPracticeButton(client: Minecraft): Boolean {
 		syncPracticeButtons(resetToStart = false)
 		if (practiceButtons.isEmpty()) {
@@ -677,6 +788,7 @@ class AutoSSSpecsafe : CgcModule(
 		targetButton = button
 		targetIsStart = false
 		targetPreAim = false
+		targetOpeningPreAim = false
 		targetPractice = false
 		targetWaitingForButton = false
 		targetAimPoint = getPracticeAimPoint(button)
@@ -726,7 +838,7 @@ class AutoSSSpecsafe : CgcModule(
 		val box = if (shape.isEmpty) AABB(pos) else shape.bounds().move(pos)
 		val random = ThreadLocalRandom.current()
 		val center = box.center
-		val tolerance = getDouble(aimTolerance)
+		val tolerance = AIM_TOLERANCE
 		val xDepth = box.xsize <= box.ysize && box.xsize <= box.zsize
 		val yDepth = box.ysize < box.xsize && box.ysize <= box.zsize
 		val x = center.x + if (xDepth) 0.0 else middleOffset(random, min(tolerance, max(0.0, box.xsize * 0.35)))
@@ -784,6 +896,74 @@ class AutoSSSpecsafe : CgcModule(
 		patternSettledAt = System.currentTimeMillis() + randomClickDelayMs()
 	}
 
+	private fun scheduleAutoRestart(): Boolean {
+		if (!autoRestartSs.value || !doingSS) {
+			return false
+		}
+
+		if (autoRestartAt <= 0L) {
+			autoRestartAt = System.currentTimeMillis() + randomAutoRestartReactionDelayMs()
+		}
+		return true
+	}
+
+	private fun tickAutoRestart(now: Long): Boolean {
+		if (autoRestartAt <= 0L) {
+			return false
+		}
+		if (!autoRestartSs.value || !doingSS) {
+			clearAutoRestart()
+			return false
+		}
+		if (now < autoRestartAt) {
+			return false
+		}
+
+		clearAutoRestart()
+		start()
+		return true
+	}
+
+	private fun clearAutoRestart() {
+		autoRestartAt = 0L
+	}
+
+	private fun handlePossibleSimonSaysFailure(message: String) {
+		if (!doingSS || !areaCheck() || !isSimonSaysFailureMessage(message)) {
+			return
+		}
+
+		scheduleAutoRestart()
+	}
+
+	private fun isSimonSaysFailureMessage(message: String): Boolean {
+		val text = stripControlCodes(message).lowercase()
+		if (text.isBlank()) {
+			return false
+		}
+		if (text.contains("completed a device") || text.contains("activated a device")) {
+			return false
+		}
+
+		val mentionsSimonSays = text.contains("simon") ||
+			text.contains(" ss") ||
+			text.contains("ss ") ||
+			text.contains("device") ||
+			text.contains("button")
+		if (!mentionsSimonSays) {
+			return false
+		}
+
+		return text.contains("fail") ||
+			text.contains("wrong") ||
+			text.contains("incorrect") ||
+			text.contains("reset") ||
+			text.contains("broke")
+	}
+
+	private fun stripControlCodes(message: String): String =
+		message.replace(CONTROL_CODE_PATTERN, "").trim()
+
 	private fun areaCheck(): Boolean =
 		forceSkyblock.value ||
 			Location.area.isArea(Island.DUNGEON) &&
@@ -807,12 +987,15 @@ class AutoSSSpecsafe : CgcModule(
 		practicePassesCompleted = 0
 		practiceMaxPasses = 0
 		practiceResumeAt = 0L
+		clearAutoRestart()
+		clearOpeningPreAim()
 		donePopupUntil = 0L
 	}
 
 	private fun finishSimonSays() {
 		doingSS = false
 		donePopupUntil = System.currentTimeMillis() + DONE_POPUP_MS
+		clearAutoRestart()
 		clearTarget()
 	}
 
@@ -821,11 +1004,13 @@ class AutoSSSpecsafe : CgcModule(
 		targetAimPoint = null
 		targetIsStart = false
 		targetPreAim = false
+		targetOpeningPreAim = false
 		targetPractice = false
 		targetPracticeReturningToStart = false
 		targetPracticeIndex = 0
 		targetWaitingForButton = false
 		preAimButton = null
+		clearOpeningPreAim()
 		aimController.clear()
 	}
 
@@ -840,9 +1025,9 @@ class AutoSSSpecsafe : CgcModule(
 	private fun getAimSettings(): AimSettings =
 		AimSettings(
 			speed = getDouble(aimSpeed),
-			randomness = getDouble(aimRandomness),
-			overshootStrength = getDouble(overshootStrength),
-			microCorrection = getDouble(microCorrection)
+			randomness = AIM_RANDOMNESS,
+			overshootStrength = OVERSHOOT_STRENGTH,
+			microCorrection = MICRO_CORRECTION
 		)
 
 	private fun getLong(setting: NumberSetting): Long =
@@ -857,8 +1042,8 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun randomClickDelayMs(): Long {
-		val minDelay = getLong(clickDelayMin).coerceAtLeast(1L)
-		val maxDelay = getLong(clickDelayMax).coerceAtLeast(1L)
+		val minDelay = CLICK_DELAY_MIN_MS.coerceAtLeast(1L)
+		val maxDelay = CLICK_DELAY_MAX_MS.coerceAtLeast(1L)
 		val low = min(minDelay, maxDelay)
 		val configuredHigh = max(minDelay, maxDelay)
 		val high = if (configuredHigh <= low) low + MIN_CLICK_DELAY_VARIANCE_MS else configuredHigh
@@ -867,6 +1052,9 @@ class AutoSSSpecsafe : CgcModule(
 
 	private fun randomPracticeResumeDelayMs(): Long =
 		ThreadLocalRandom.current().nextLong(MIN_PRACTICE_RESUME_DELAY_MS, MAX_PRACTICE_RESUME_DELAY_MS + 1L)
+
+	private fun randomAutoRestartReactionDelayMs(): Long =
+		ThreadLocalRandom.current().nextLong(MIN_AUTO_RESTART_REACTION_MS, MAX_AUTO_RESTART_REACTION_MS + 1L)
 
 	private fun chat(message: String) {
 		Minecraft.getInstance().player?.displayClientMessage(Component.literal(message), false)
@@ -880,14 +1068,25 @@ class AutoSSSpecsafe : CgcModule(
 		private const val FINAL_SEQUENCE_LENGTH = 5
 		private const val PRACTICE_UNLOCK_SEQUENCE_COUNT = 2
 		private const val PRACTICE_BUTTON_FACE_X = 0.875
-		private const val PRACTICE_AIM_OFFSET = 0.16
+		private const val PRACTICE_AIM_OFFSET = 0.28
+		private const val MEDIUM_PRACTICE_TURN_DISTANCE = 32.0
+		private const val FIRST_PATTERN_PRE_AIM_REACTION_MS = 150L
 		private const val MIN_PRACTICE_RESUME_DELAY_MS = 300L
 		private const val MAX_PRACTICE_RESUME_DELAY_MS = 380L
+		private const val MIN_AUTO_RESTART_REACTION_MS = 180L
+		private const val MAX_AUTO_RESTART_REACTION_MS = 200L
 		private const val DONE_POPUP_MS = 1500L
+		private const val AIM_RANDOMNESS = 0.1
+		private const val AIM_TOLERANCE = 0.18
+		private const val OVERSHOOT_STRENGTH = 1.2
+		private const val MICRO_CORRECTION = 0.45
+		private const val CLICK_DELAY_MIN_MS = 8L
+		private const val CLICK_DELAY_MAX_MS = 14L
 		private const val MIN_CLICK_DELAY_VARIANCE_MS = 4L
 		private const val MIN_START_CLICK_DELAY_MS = 105L
 		private const val MAX_START_CLICK_DELAY_MS = 130L
 		private const val AUTO_START_DELAY_RANDOM_EXTRA_MS = 40L
+		private val CONTROL_CODE_PATTERN = Regex("(?i)§[0-9A-FK-OR]")
 
 		private fun startButtonPos(): BlockPos =
 			BlockPos.containing(START_BUTTON.x, START_BUTTON.y, START_BUTTON.z)
