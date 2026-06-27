@@ -20,14 +20,14 @@ import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ColourSetting
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.NumberSetting
+import cgc.cgc.runtime.CgcRenderPrimitives
 import cgc.cgc.utils.DungeonUtils
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
-import net.minecraft.client.gui.GuiGraphics
+import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.multiplayer.ClientLevel
 import net.minecraft.client.player.LocalPlayer
-import net.minecraft.client.renderer.RenderType
-import net.minecraft.client.renderer.ShapeRenderer
+import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
 import net.minecraft.world.InteractionHand
@@ -56,6 +56,8 @@ class AutoSSSpecsafe : CgcModule(
 	private val forceSkyblock = BooleanSetting("Force Skyblock", false)
 	private val autoStartDelay = NumberSetting("Auto start delay (MS)", 10.0, 500.0, 120.0, 10.0)
 	private val aimSpeed = NumberSetting("Aim Speed", 0.5, 2.0, 1.0, 0.05, "x")
+	private val waitCorrectionAimSpeed = NumberSetting("Wait Correction Aim Speed", 0.1, 2.0, 0.6, 0.05, "x")
+	private val practiceAimSpeed = NumberSetting("Practice Aim Speed", 0.1, 2.0, 0.6, 0.05, "x")
 	private val donePopup = BooleanSetting("Done Popup", false)
 	private val fillColor = ColourSetting("Button Fill Color", Colour(85, 255, 85))
 	private val outlineColor = ColourSetting("Button Outline Color", Colour(0, 170, 0))
@@ -80,6 +82,8 @@ class AutoSSSpecsafe : CgcModule(
 	private var targetPracticeReturningToStart = false
 	private var targetPracticeIndex = 0
 	private var targetWaitingForButton = false
+	private var targetWaitCorrectionStarted = false
+	private var targetWaitCorrectionOnRealButton = false
 	private var preAimButton: BlockPos? = null
 	private var openingPreAimButton: BlockPos? = null
 	private var openingPreAimAt = 0L
@@ -103,6 +107,8 @@ class AutoSSSpecsafe : CgcModule(
 			forceSkyblock,
 			autoStartDelay,
 			aimSpeed,
+			waitCorrectionAimSpeed,
+			practiceAimSpeed,
 			donePopup,
 			fillColor,
 			outlineColor
@@ -191,7 +197,7 @@ class AutoSSSpecsafe : CgcModule(
 		}
 	}
 
-	override fun onWorldRenderExtract(context: WorldRenderContext) {
+	override fun onWorldRenderExtract(context: LevelRenderContext) {
 		val client = Minecraft.getInstance()
 		if (!areaCheck() || client.player == null || client.level == null) {
 			return
@@ -203,7 +209,7 @@ class AutoSSSpecsafe : CgcModule(
 		}
 	}
 
-	override fun onHudRender(gfx: GuiGraphics) {
+	override fun onHudRender(gfx: GuiGraphicsExtractor) {
 		if (!donePopup.value || System.currentTimeMillis() > donePopupUntil) {
 			return
 		}
@@ -222,7 +228,7 @@ class AutoSSSpecsafe : CgcModule(
 			centerY + client.font.lineHeight / 2 + boxPaddingY,
 			0xAA000000.toInt()
 		)
-		gfx.drawCenteredString(client.font, text, centerX, centerY - client.font.lineHeight / 2, 0xFF55FF55.toInt())
+		gfx.centeredText(client.font, text, centerX, centerY - client.font.lineHeight / 2, 0xFF55FF55.toInt())
 	}
 
 	override fun onWorldLoad() {
@@ -352,6 +358,10 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
+		if (beginWaitCorrectionIfNeeded(client, button, aimResult)) {
+			return
+		}
+
 		if (targetPractice) {
 			if (shouldAdvancePracticeTarget(aimResult)) {
 				beginNextPracticeButton(client)
@@ -415,6 +425,8 @@ class AutoSSSpecsafe : CgcModule(
 		targetOpeningPreAim = false
 		targetPractice = false
 		targetWaitingForButton = false
+		targetWaitCorrectionStarted = false
+		targetWaitCorrectionOnRealButton = false
 		targetAimPoint = if (startButton && startAimPoint != null) startAimPoint else getAimPoint(level, button)
 		val aimPoint = targetAimPoint ?: return
 		val mode = modeOverride ?: when {
@@ -422,7 +434,7 @@ class AutoSSSpecsafe : CgcModule(
 			flowingRetarget -> AimMode.CHAINED_RETARGET
 			else -> AimMode.NORMAL_BUTTON
 		}
-		aimController.start(player, aimPoint, getAimSettings(), mode)
+		aimController.start(player, aimPoint, getAimSettings(mode), mode)
 	}
 
 	private fun clickTarget(client: Minecraft): Boolean {
@@ -566,13 +578,15 @@ class AutoSSSpecsafe : CgcModule(
 		targetOpeningPreAim = true
 		targetPractice = false
 		targetWaitingForButton = false
+		targetWaitCorrectionStarted = false
+		targetWaitCorrectionOnRealButton = false
 		preAimButton = button
 		targetAimPoint = if (level.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
 			getAimPoint(level, button)
 		} else {
 			getPracticeAimPoint(button)
 		}
-		aimController.start(player, targetAimPoint!!, getAimSettings(), AimMode.PRE_AIM)
+		aimController.start(player, targetAimPoint!!, getAimSettings(AimMode.PRE_AIM), AimMode.PRE_AIM)
 		return true
 	}
 
@@ -791,9 +805,36 @@ class AutoSSSpecsafe : CgcModule(
 		targetOpeningPreAim = false
 		targetPractice = false
 		targetWaitingForButton = false
+		targetWaitCorrectionStarted = false
+		targetWaitCorrectionOnRealButton = false
 		targetAimPoint = getPracticeAimPoint(button)
 		val mode = if (returnToStart) AimMode.PRACTICE_RETURN else AimMode.PRACTICE
-		aimController.start(player, targetAimPoint!!, getAimSettings(), mode)
+		aimController.start(player, targetAimPoint!!, getAimSettings(mode), mode)
+	}
+
+	private fun beginWaitCorrectionIfNeeded(client: Minecraft, button: BlockPos, aimResult: AimUpdateResult): Boolean {
+		if (!targetPreAim && !targetWaitingForButton) {
+			return false
+		}
+
+		val player = client.player ?: return false
+		val level = client.level ?: return false
+		val realButton = level.getBlockState(button).`is`(Blocks.STONE_BUTTON)
+		if (!realButton) {
+			return false
+		}
+		if (targetWaitCorrectionOnRealButton) {
+			return false
+		}
+		if (!aimResult.finished && !targetWaitCorrectionStarted) {
+			return false
+		}
+
+		targetAimPoint = getAimPoint(level, button)
+		targetWaitCorrectionStarted = true
+		targetWaitCorrectionOnRealButton = true
+		aimController.start(player, targetAimPoint!!, getAimSettings(AimMode.WAIT_CORRECTION), AimMode.WAIT_CORRECTION)
+		return true
 	}
 
 	private fun readyToSolveCurrentPattern(client: Minecraft): Boolean {
@@ -856,32 +897,27 @@ class AutoSSSpecsafe : CgcModule(
 		)
 	}
 
-	private fun renderButton(context: WorldRenderContext, level: ClientLevel, pos: BlockPos, colorFill: Colour, colorOutline: Colour) {
+	private fun renderButton(context: LevelRenderContext, level: ClientLevel, pos: BlockPos, colorFill: Colour, colorOutline: Colour) {
 		val state = level.getBlockState(pos)
 		val shape: VoxelShape = state.getShape(level, pos)
 		if (!shape.isEmpty) {
-			val camera = Minecraft.getInstance().gameRenderer.mainCamera.position
+			val camera = Minecraft.getInstance().gameRenderer.mainCamera.position()
 			val box = shape.bounds().move(pos)
-			val matrices = context.matrices()
+			val matrices = context.poseStack()
 			matrices.pushPose()
 			matrices.translate(-camera.x, -camera.y, -camera.z)
-			ShapeRenderer.addChainedFilledBoxVertices(
+			CgcRenderPrimitives.filledBox(
 				matrices,
-				context.consumers().getBuffer(RenderType.debugFilledBox()),
-				box.minX,
-				box.minY,
-				box.minZ,
-				box.maxX,
-				box.maxY,
-				box.maxZ,
+				context.bufferSource().getBuffer(RenderTypes.debugFilledBox()),
+				box,
 				colorFill.red / 255.0f,
 				colorFill.green / 255.0f,
 				colorFill.blue / 255.0f,
 				colorFill.alpha / 255.0f
 			)
-			ShapeRenderer.renderLineBox(
-				matrices.last(),
-				context.consumers().getBuffer(RenderType.lines()),
+			CgcRenderPrimitives.lineBox(
+				matrices,
+				context.bufferSource().getBuffer(RenderTypes.lines()),
 				box,
 				colorOutline.red / 255.0f,
 				colorOutline.green / 255.0f,
@@ -993,6 +1029,7 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun finishSimonSays() {
+		AutoLeap.onSimonSaysComplete()
 		doingSS = false
 		donePopupUntil = System.currentTimeMillis() + DONE_POPUP_MS
 		clearAutoRestart()
@@ -1009,6 +1046,8 @@ class AutoSSSpecsafe : CgcModule(
 		targetPracticeReturningToStart = false
 		targetPracticeIndex = 0
 		targetWaitingForButton = false
+		targetWaitCorrectionStarted = false
+		targetWaitCorrectionOnRealButton = false
 		preAimButton = null
 		clearOpeningPreAim()
 		aimController.clear()
@@ -1022,13 +1061,20 @@ class AutoSSSpecsafe : CgcModule(
 		return (random.nextDouble(-maxOffset, maxOffset) + random.nextDouble(-maxOffset, maxOffset)) * 0.5
 	}
 
-	private fun getAimSettings(): AimSettings =
-		AimSettings(
-			speed = getDouble(aimSpeed),
+	private fun getAimSettings(mode: AimMode): AimSettings {
+		val speedMultiplier = when (mode) {
+			AimMode.PRACTICE,
+			AimMode.PRACTICE_RETURN -> getDouble(practiceAimSpeed)
+			AimMode.WAIT_CORRECTION -> getDouble(waitCorrectionAimSpeed)
+			else -> 1.0
+		}
+		return AimSettings(
+			speed = getDouble(aimSpeed) * speedMultiplier,
 			randomness = AIM_RANDOMNESS,
 			overshootStrength = OVERSHOOT_STRENGTH,
 			microCorrection = MICRO_CORRECTION
 		)
+	}
 
 	private fun getLong(setting: NumberSetting): Long =
 		setting.value.toLong()
@@ -1057,7 +1103,7 @@ class AutoSSSpecsafe : CgcModule(
 		ThreadLocalRandom.current().nextLong(MIN_AUTO_RESTART_REACTION_MS, MAX_AUTO_RESTART_REACTION_MS + 1L)
 
 	private fun chat(message: String) {
-		Minecraft.getInstance().player?.displayClientMessage(Component.literal(message), false)
+		Minecraft.getInstance().player?.sendSystemMessage(Component.literal(message))
 	}
 
 	private companion object {
@@ -1068,11 +1114,11 @@ class AutoSSSpecsafe : CgcModule(
 		private const val FINAL_SEQUENCE_LENGTH = 5
 		private const val PRACTICE_UNLOCK_SEQUENCE_COUNT = 2
 		private const val PRACTICE_BUTTON_FACE_X = 0.875
-		private const val PRACTICE_AIM_OFFSET = 0.28
+		private const val PRACTICE_AIM_OFFSET = 0.44
 		private const val MEDIUM_PRACTICE_TURN_DISTANCE = 32.0
-		private const val FIRST_PATTERN_PRE_AIM_REACTION_MS = 150L
-		private const val MIN_PRACTICE_RESUME_DELAY_MS = 300L
-		private const val MAX_PRACTICE_RESUME_DELAY_MS = 380L
+		private const val FIRST_PATTERN_PRE_AIM_REACTION_MS = 180L
+		private const val MIN_PRACTICE_RESUME_DELAY_MS = 500L
+		private const val MAX_PRACTICE_RESUME_DELAY_MS = 580L
 		private const val MIN_AUTO_RESTART_REACTION_MS = 180L
 		private const val MAX_AUTO_RESTART_REACTION_MS = 200L
 		private const val DONE_POPUP_MS = 1500L

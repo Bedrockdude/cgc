@@ -21,6 +21,16 @@ class ColourSetting(
 		onEdit()
 	}
 
+	fun setColour(red: Int = value.red, green: Int = value.green, blue: Int = value.blue, alpha: Int = value.alpha) {
+		value = Colour(
+			red.coerceIn(0, 255),
+			green.coerceIn(0, 255),
+			blue.coerceIn(0, 255),
+			alpha.coerceIn(0, 255)
+		)
+		onEdit()
+	}
+
 	override fun loadFromJson(obj: JsonObject) {
 		value = Colour(
 			obj.get("red").asInt,

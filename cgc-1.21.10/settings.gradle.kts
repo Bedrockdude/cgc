@@ -9,8 +9,12 @@ pluginManagement {
 	}
 
 	plugins {
-		id("net.fabricmc.fabric-loom-remap") version providers.gradleProperty("loom_version")
+		id("net.fabricmc.fabric-loom") version providers.gradleProperty("loom_version")
 	}
+}
+
+plugins {
+	id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
 // Should match your modid

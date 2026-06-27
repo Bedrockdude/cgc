@@ -4,14 +4,17 @@ import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.module.setting.Setting
+import cgc.cgc.module.setting.StringSetting
 
 object CgcSettings {
 	val openAnimation = BooleanSetting("Open Animation", true)
+	val commandPrefix = StringSetting("Command Prefix", ".", allowBlank = false, maxLength = 8)
 	val moduleToggleClick = ModeSetting("Module Toggle Click", "Right", listOf("Left", "Right"))
 	val guiTransparency = NumberSetting("GUI Transparency", 0.0, 0.95, 0.10, 0.05, displayAsPercent = true)
 
 	val settings: List<Setting<*>> = listOf(
 		openAnimation,
+		commandPrefix,
 		moduleToggleClick,
 		guiTransparency
 	)

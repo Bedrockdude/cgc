@@ -1,5 +1,6 @@
 package cgc.cgc.mixin;
 
+import cgc.cgc.dungeon.DungeonState;
 import cgc.cgc.location.Location;
 import cgc.cgc.module.CgcModules;
 import net.minecraft.client.multiplayer.ClientPacketListener;
@@ -54,5 +55,6 @@ public class ClientPacketListenerMixin {
 	@Inject(method = "handlePlayerInfoUpdate", at = @At("HEAD"))
 	private void cgc$onPlayerInfoUpdate(ClientboundPlayerInfoUpdatePacket packet, CallbackInfo ci) {
 		Location.handlePlayerInfo(packet);
+		DungeonState.handlePlayerInfo(packet);
 	}
 }

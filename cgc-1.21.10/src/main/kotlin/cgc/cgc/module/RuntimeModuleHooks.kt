@@ -1,9 +1,10 @@
 package cgc.cgc.module
 
-import net.minecraft.client.gui.GuiGraphics
+import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.core.BlockPos
+import net.minecraft.network.protocol.Packet
 import net.minecraft.world.level.block.state.BlockState
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 
 interface WorldLoadModule {
 	fun onWorldLoad()
@@ -26,9 +27,21 @@ interface WorldRenderStartModule {
 }
 
 interface WorldRenderExtractModule {
-	fun onWorldRenderExtract(context: WorldRenderContext)
+	fun onWorldRenderExtract(context: LevelRenderContext)
 }
 
 interface HudRenderModule {
-	fun onHudRender(gfx: GuiGraphics)
+	fun onHudRender(gfx: GuiGraphicsExtractor)
+}
+
+interface PacketReceiveModule {
+	fun onPacketReceive(packet: Packet<*>): Boolean
+}
+
+interface PacketPostReceiveModule {
+	fun onPacketPostReceive(packet: Packet<*>)
+}
+
+interface PacketSendModule {
+	fun onPacketSend(packet: Packet<*>): Boolean
 }

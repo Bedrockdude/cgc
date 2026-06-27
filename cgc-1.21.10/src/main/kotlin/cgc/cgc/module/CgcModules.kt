@@ -1,14 +1,33 @@
 package cgc.cgc.module
 
+import cgc.cgc.dungeon.DungeonState
+import cgc.cgc.terminal.TerminalContext
 import cgc.cgc.module.impl.dungeon.AutoSSSpecsafe
+import cgc.cgc.module.impl.dungeon.AutoLeap
+import cgc.cgc.module.impl.dungeon.AutoP3
+import cgc.cgc.module.impl.dungeon.AutoTerms
+import cgc.cgc.module.impl.dungeon.BreakerAura
+import cgc.cgc.module.impl.dungeon.DungeonBreaker
+import cgc.cgc.module.impl.dungeon.FastLeap
+import cgc.cgc.module.impl.dungeon.LeapCounter
 import cgc.cgc.module.impl.dungeon.SSTriggerBot
+import cgc.cgc.module.impl.dungeon.TerminalSolver
+import cgc.cgc.module.impl.movement.Ether
+import cgc.cgc.module.impl.movement.VelocityBuffer
+import cgc.cgc.module.impl.other.DNYapper
+import cgc.cgc.module.impl.player.BonzoHelper
+import cgc.cgc.module.impl.player.MaskHelper
 import cgc.cgc.module.impl.render.CgcClickGuiModule
+import cgc.cgc.module.impl.render.EnderPearlTrajectory
+import cgc.cgc.module.impl.render.opsec.OpSec
 import cgc.cgc.module.setting.KeybindSetting
+import cgc.cgc.runtime.CgcRuntime
 import cgc.cgc.location.Location
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
-import net.minecraft.client.gui.GuiGraphics
+import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.core.BlockPos
+import net.minecraft.network.protocol.Packet
 import net.minecraft.world.level.block.state.BlockState
 
 object CgcModules {
@@ -22,12 +41,29 @@ object CgcModules {
 
 		manager.register(
 			CgcClickGuiModule(),
+			Ether(),
+			VelocityBuffer(),
+			DungeonBreaker(),
+			BreakerAura(),
+			LeapCounter(),
+			FastLeap(),
+			AutoLeap(),
+			AutoP3(),
+			AutoTerms(),
+			TerminalSolver(),
 			AutoSSSpecsafe(),
-			SSTriggerBot()
+			SSTriggerBot(),
+			EnderPearlTrajectory(),
+			OpSec(),
+			BonzoHelper(),
+			MaskHelper(),
+			DNYapper()
 		)
 	}
 
 	fun clientTick(client: Minecraft) {
+		CgcRuntime.clientTickStart(client)
+		DungeonState.tick(client)
 		pollKeybinds(client)
 
 		manager.all()
@@ -39,7 +75,10 @@ object CgcModules {
 
 	@JvmStatic
 	fun worldLoad() {
+		CgcRuntime.worldLoad()
 		Location.reset()
+		DungeonState.reset()
+		TerminalContext.reset()
 		manager.all()
 			.asSequence()
 			.filterIsInstance<WorldLoadModule>()
@@ -49,6 +88,7 @@ object CgcModules {
 	@JvmStatic
 	fun chatMessage(message: String) {
 		Location.noteDungeonBossChat(message)
+		DungeonState.handleChat(message)
 		manager.all()
 			.asSequence()
 			.filter { it.enabled }
@@ -83,7 +123,7 @@ object CgcModules {
 			.forEach { it.onWorldRenderStart() }
 	}
 
-	fun worldRenderExtract(context: WorldRenderContext) {
+	fun worldRenderExtract(context: LevelRenderContext) {
 		manager.all()
 			.asSequence()
 			.filter { it.enabled }
@@ -91,7 +131,7 @@ object CgcModules {
 			.forEach { it.onWorldRenderExtract(context) }
 	}
 
-	fun hudRender(gfx: GuiGraphics) {
+	fun hudRender(gfx: GuiGraphicsExtractor) {
 		manager.all()
 			.asSequence()
 			.filter { it.enabled }
@@ -99,14 +139,47 @@ object CgcModules {
 			.forEach { it.onHudRender(gfx) }
 	}
 
+	@JvmStatic
+	fun packetReceive(packet: Packet<*>): Boolean =
+		run {
+			CgcRuntime.packetReceive(packet)
+			manager.all()
+				.asSequence()
+				.filter { it.enabled }
+				.filterIsInstance<PacketReceiveModule>()
+				.any { it.onPacketReceive(packet) }
+		}
+
+	@JvmStatic
+	fun packetPostReceive(packet: Packet<*>) {
+		manager.all()
+			.asSequence()
+			.filter { it.enabled }
+			.filterIsInstance<PacketPostReceiveModule>()
+			.forEach { it.onPacketPostReceive(packet) }
+	}
+
+	@JvmStatic
+	fun packetSend(packet: Packet<*>): Boolean =
+		run {
+			CgcRuntime.packetSend(packet)
+			manager.all()
+				.asSequence()
+				.filter { it.enabled }
+				.filterIsInstance<PacketSendModule>()
+				.any { it.onPacketSend(packet) }
+		}
+
 	private fun pollKeybinds(client: Minecraft) {
 		val window = client.window
 		manager.all()
 			.asSequence()
-			.filter { it.enabled }
-			.flatMap { it.flatSettings().asSequence() }
-			.filterIsInstance<KeybindSetting>()
-			.filter { it.persistent || it.isRegistered() }
+			.flatMap { module ->
+				module.flatSettings()
+					.asSequence()
+					.filterIsInstance<KeybindSetting>()
+					.filter { it.persistent || (module.enabled && it.isRegistered()) }
+			}
 			.forEach { it.value.tick(window) }
 	}
 }

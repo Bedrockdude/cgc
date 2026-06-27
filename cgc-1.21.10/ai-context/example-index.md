@@ -88,3 +88,12 @@ When you identify a useful example, add an entry like this:
   - `src/main/java/com/Bedrock/module/impl/dungeon/AutoSSSpecsafe.java`
 - Why it matters: This is the first real dungeon module copied into CGC and exercises keybind, boolean, number, and colour settings.
 - What to copy vs what to avoid: Copy the module settings and Simon Says state machine. RSM/RSZ infrastructure dependencies need CGC-native replacements before the port can be completely identical at runtime.
+
+## Feature: DN Yapper
+
+- Example project: `../Example Skyblock mods/RSZ`
+- Source file(s):
+  - `src/main/java/com/Bedrock/module/impl/other/DNYapper.java`
+  - `src/main/java/com/Bedrock/mixins/accessor/AccessorAbstractContainerScreen.java`
+- Why it matters: This is the first non-SS module ported from an example mod into CGC-native module registration.
+- What to copy vs what to avoid: Port the module into CGC's own `CgcModule`, `KeybindSetting`, and config lifecycle. Keep only the hovered-slot accessor mixin needed by the feature; do not bundle or initialize the legacy RSM/RSZ runtime.

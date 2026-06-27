@@ -31,6 +31,11 @@
 - Config persistence: `src/main/kotlin/cgc/cgc/config/CgcConfigStore.kt`
 - Setting framework: `src/main/kotlin/cgc/cgc/module/setting/`
 - Config GUI: `src/main/kotlin/cgc/cgc/client/gui/CgcConfigScreen.kt`
+- Runtime 3D renderer: `src/main/kotlin/cgc/cgc/runtime/CgcRenderer3D.kt`
 - Java source root: `src/main/java/`
 - Kotlin source root: `src/main/kotlin/`
 - Resources root: `src/main/resources/`
+
+## Runtime Notes
+
+- `CgcRenderer3D` is a small queued 3D renderer inspired by RSM's `Renderer3D`. Modules enqueue box tasks during world render hooks, and `CgcClient` flushes them after module world rendering.

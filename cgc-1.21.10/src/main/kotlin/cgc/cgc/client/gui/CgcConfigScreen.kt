@@ -20,7 +20,7 @@ import cgc.cgc.module.setting.group.GroupSetting
 import com.mojang.blaze3d.platform.InputConstants
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.Font
-import net.minecraft.client.gui.GuiGraphics
+import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.client.input.CharacterEvent
 import net.minecraft.client.input.KeyEvent
@@ -37,7 +37,7 @@ class CgcConfigScreen : Screen(Component.literal("CGC Config")) {
 	private val panel = RsmStylePanel()
 	private val openedAt = System.currentTimeMillis()
 
-	override fun render(gfx: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
+	override fun extractRenderState(gfx: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, partialTick: Float) {
 		val progress = if (CgcSettings.openAnimation.value) {
 			val elapsed = (System.currentTimeMillis() - openedAt).coerceAtLeast(0L)
 			easeOutCubic(min(1.0f, elapsed / 250.0f))
@@ -46,10 +46,10 @@ class CgcConfigScreen : Screen(Component.literal("CGC Config")) {
 		}
 
 		panel.render(gfx, width, height, mouseX, mouseY, progress)
-		super.render(gfx, mouseX, mouseY, partialTick)
+		super.extractRenderState(gfx, mouseX, mouseY, partialTick)
 	}
 
-	override fun renderBackground(gfx: GuiGraphics, mouseX: Int, mouseY: Int, partialTicks: Float) {
+	override fun extractBackground(gfx: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, partialTicks: Float) {
 	}
 
 	override fun mouseClicked(click: MouseButtonEvent, doubled: Boolean): Boolean =
@@ -109,6 +109,7 @@ private class RsmStylePanel {
 	private var focusedSave: SaveSetting<*>? = null
 	private var waitingKeybind: KeybindSetting? = null
 	private var draggingNumber: NumberSetting? = null
+	private var draggingColour: ColourDrag? = null
 	private var expandedSettingKey: String? = null
 	private var initialized = false
 	private var leftBounds = Bounds.ZERO
@@ -118,7 +119,7 @@ private class RsmStylePanel {
 	private var panelWidthPixels = WIDTH
 	private var panelHeightPixels = HEIGHT
 
-	fun render(gfx: GuiGraphics, screenWidth: Int, screenHeight: Int, mouseX: Int, mouseY: Int, progress: Float) {
+	fun render(gfx: GuiGraphicsExtractor, screenWidth: Int, screenHeight: Int, mouseX: Int, mouseY: Int, progress: Float) {
 		initializeState()
 		hitboxes.clear()
 
@@ -160,6 +161,10 @@ private class RsmStylePanel {
 	fun mouseReleased(mouseX: Double, mouseY: Double, button: Int): Boolean {
 		if (draggingNumber != null) {
 			draggingNumber = null
+			return true
+		}
+		if (draggingColour != null) {
+			draggingColour = null
 			return true
 		}
 		return false
@@ -242,7 +247,7 @@ private class RsmStylePanel {
 		expandedCategories.add(selectedCategory)
 	}
 
-	private fun drawShell(gfx: GuiGraphics, x: Int, y: Int, width: Int, height: Int, progress: Float) {
+	private fun drawShell(gfx: GuiGraphicsExtractor, x: Int, y: Int, width: Int, height: Int, progress: Float) {
 		fill(gfx, x, y, x + width, y + height, surface(Colours.BACKGROUND, progress), applyOpacity = false)
 		drawRectOutline(gfx, x, y, width, height, Colours.GROUP_OUTLINE)
 
@@ -252,10 +257,10 @@ private class RsmStylePanel {
 		fill(gfx, x, contentY, x + width, contentY + 1, Colours.LINE)
 		fill(gfx, x + LEFT_WIDTH - 1, contentY + 1, x + LEFT_WIDTH, y + height - 25, Colours.LINE)
 		fill(gfx, x, y + height - 25, x + width, y + height - 24, Colours.LINE)
-		gfx.drawString(font(), "CGC", x + 20, y + 20, Colours.TEXT, false)
+		gfx.text(font(), "CGC", x + 20, y + 20, Colours.TEXT, false)
 	}
 
-	private fun renderSearch(gfx: GuiGraphics, x: Int, y: Int, mouseX: Int, mouseY: Int) {
+	private fun renderSearch(gfx: GuiGraphicsExtractor, x: Int, y: Int, mouseX: Int, mouseY: Int) {
 		val searchX = x + 16
 		val searchY = y + 67
 		val hovered = Bounds(searchX, searchY, 94, 25).contains(mouseX.toDouble(), mouseY.toDouble())
@@ -265,7 +270,7 @@ private class RsmStylePanel {
 		drawRectOutline(gfx, searchX, searchY, 94, 25, Colours.SEARCH_OUTLINE)
 
 		val display = if (search.isBlank() && !writingSearch) "Search" else search + if (writingSearch) "|" else ""
-		gfx.drawString(font(), fit(font(), display, 80), searchX + 8, searchY + 9, if (search.isBlank() && !writingSearch) Colours.UNSELECTED_TEXT else Colours.TEXT, false)
+		gfx.text(font(), fit(font(), display, 80), searchX + 8, searchY + 9, if (search.isBlank() && !writingSearch) Colours.UNSELECTED_TEXT else Colours.TEXT, false)
 
 		hitboxes.add(Hitbox(searchX, searchY, 94, 25) { button ->
 			if (button == 0) {
@@ -277,7 +282,7 @@ private class RsmStylePanel {
 		})
 	}
 
-	private fun renderLeftNavigation(gfx: GuiGraphics, x: Int, y: Int, height: Int, mouseX: Int, mouseY: Int) {
+	private fun renderLeftNavigation(gfx: GuiGraphicsExtractor, x: Int, y: Int, height: Int, mouseX: Int, mouseY: Int) {
 		val navX = x
 		val navY = y + 104
 		val navBottom = y + height - 70
@@ -306,7 +311,7 @@ private class RsmStylePanel {
 		renderSettingsButton(gfx, x, y + height - 55, mouseX, mouseY)
 	}
 
-	private fun renderSettingsButton(gfx: GuiGraphics, x: Int, y: Int, mouseX: Int, mouseY: Int) {
+	private fun renderSettingsButton(gfx: GuiGraphicsExtractor, x: Int, y: Int, mouseX: Int, mouseY: Int) {
 		val module = CgcModules.manager.get("ClickGUI") ?: return
 		val buttonX = x + 16
 		val buttonY = y
@@ -315,7 +320,7 @@ private class RsmStylePanel {
 		val hoverValue = animate(moduleHover, "settings-button", if (hovered || selected) 1.0f else 0.0f)
 
 		if (selected) fill(gfx, buttonX - 8, buttonY - 1, buttonX - 6, buttonY + 15, Colours.SELECTED)
-		gfx.drawString(font(), "Settings", buttonX, buttonY + 2, blend(Colours.UNSELECTED_TEXT, Colours.SELECTED_TEXT, hoverValue), false)
+		gfx.text(font(), "Settings", buttonX, buttonY + 2, blend(Colours.UNSELECTED_TEXT, Colours.SELECTED_TEXT, hoverValue), false)
 
 		hitboxes.add(Hitbox(buttonX - 7, buttonY - 6, LEFT_WIDTH - 28, 24) { button ->
 			if (button == 0) {
@@ -329,7 +334,7 @@ private class RsmStylePanel {
 	}
 
 	private fun renderCategoryDropdown(
-		gfx: GuiGraphics,
+		gfx: GuiGraphicsExtractor,
 		category: ModuleCategory,
 		modules: List<CgcModule>,
 		x: Int,
@@ -352,8 +357,8 @@ private class RsmStylePanel {
 
 		if (isVisible(y - 6, CATEGORY_HIT_HEIGHT, clipTop, clipBottom)) {
 			if (selected) fill(gfx, rowX - 8, y - 2, rowX - 6, y + 14, Colours.SELECTED)
-			gfx.drawString(font, if (expanded) "v" else ">", rowX + 1, y + 1, Colours.UNSELECTED_TEXT, false)
-			gfx.drawString(font, category.displayName, rowX + 18, y + 1, blend(Colours.UNSELECTED_TEXT, Colours.SELECTED_TEXT, hoverValue), false)
+			gfx.text(font, if (expanded) "v" else ">", rowX + 1, y + 1, Colours.UNSELECTED_TEXT, false)
+			gfx.text(font, category.displayName, rowX + 18, y + 1, blend(Colours.UNSELECTED_TEXT, Colours.SELECTED_TEXT, hoverValue), false)
 			hitboxes.add(Hitbox(rowX - 7, y - 6, rowWidth, CATEGORY_HIT_HEIGHT) { button ->
 				if (button == 0) {
 					selectedCategory = category
@@ -374,7 +379,7 @@ private class RsmStylePanel {
 		val shownHeight = ((max(1, modules.size) * MODULE_STEP) * openValue).roundToInt()
 		if (modules.isEmpty()) {
 			if (shownHeight > MODULE_STEP / 2 && isVisible(y, MODULE_HIT_HEIGHT, clipTop, clipBottom)) {
-				gfx.drawString(font, if (search.isBlank()) "No modules" else "No matches", rowX + 20, y + 1, Colours.UNSELECTED_TEXT, false)
+				gfx.text(font, if (search.isBlank()) "No modules" else "No matches", rowX + 20, y + 1, Colours.UNSELECTED_TEXT, false)
 			}
 		} else {
 			val moduleStartY = y
@@ -390,13 +395,13 @@ private class RsmStylePanel {
 		return startY + CATEGORY_STEP + shownHeight + 4
 	}
 
-	private fun renderSelectedModule(gfx: GuiGraphics, x: Int, y: Int, mouseX: Int, mouseY: Int) {
+	private fun renderSelectedModule(gfx: GuiGraphicsExtractor, x: Int, y: Int, mouseX: Int, mouseY: Int) {
 		val selected = selectedModules[selectedCategory] ?: modulesByCategory[selectedCategory]?.firstOrNull()
 		if (selected != null) selectedModules[selectedCategory] = selected
 		renderModule(gfx, x, y, selected, mouseX, mouseY)
 	}
 
-	private fun renderModuleLine(gfx: GuiGraphics, module: CgcModule, x: Int, y: Int, width: Int, mouseX: Int, mouseY: Int) {
+	private fun renderModuleLine(gfx: GuiGraphicsExtractor, module: CgcModule, x: Int, y: Int, width: Int, mouseX: Int, mouseY: Int) {
 		val font = font()
 		val selected = selectedCategory == module.category && selectedModules[module.category] == module
 		val textWidth = font.width(module.displayName) + 10
@@ -409,7 +414,7 @@ private class RsmStylePanel {
 			fill(gfx, x - 1, y - 3, x + min(width, textWidth + 2), y + 13, withAlpha(Colours.ENABLED, (120 * toggleValue).roundToInt()))
 		}
 
-		gfx.drawString(
+		gfx.text(
 			font,
 			fit(font, module.displayName, width - 4),
 			x + 6,
@@ -433,7 +438,7 @@ private class RsmStylePanel {
 		})
 	}
 
-	private fun renderModule(gfx: GuiGraphics, x: Int, y: Int, module: CgcModule?, mouseX: Int, mouseY: Int) {
+	private fun renderModule(gfx: GuiGraphicsExtractor, x: Int, y: Int, module: CgcModule?, mouseX: Int, mouseY: Int) {
 		val panelX = x + LEFT_WIDTH
 		val panelY = y + 60
 		val rightWidth = rightWidth()
@@ -443,7 +448,7 @@ private class RsmStylePanel {
 		fill(gfx, panelX + 5, panelY + 39, panelX + rightWidth - 5, panelY + 40, Colours.GROUP_OUTLINE)
 
 		if (module == null) {
-			gfx.drawString(font(), "No module selected", panelX + 18, panelY + 68, Colours.UNSELECTED_TEXT, false)
+			gfx.text(font(), "No module selected", panelX + 18, panelY + 68, Colours.UNSELECTED_TEXT, false)
 			return
 		}
 
@@ -455,7 +460,7 @@ private class RsmStylePanel {
 		renderGroupSettings(gfx, module, group, x, y, mouseX, mouseY)
 	}
 
-	private fun renderGroupTabs(gfx: GuiGraphics, module: CgcModule, selectedGroup: GroupSetting<*>?, x: Int, y: Int, mouseX: Int, mouseY: Int) {
+	private fun renderGroupTabs(gfx: GuiGraphicsExtractor, module: CgcModule, selectedGroup: GroupSetting<*>?, x: Int, y: Int, mouseX: Int, mouseY: Int) {
 		val font = font()
 		var cursorX = x + LEFT_WIDTH + 18
 		val tabY = y + 76
@@ -470,7 +475,7 @@ private class RsmStylePanel {
 			val selectValue = animate(groupSelect, key, if (selected) 1.0f else 0.0f)
 
 			if (hovered) fill(gfx, cursorX - 5, y + 68, cursorX + tabWidth, y + 94, Colours.SELECTED_BACKGROUND)
-			gfx.drawString(font, group.name, cursorX, tabY, blend(if (enabled) Colours.ENABLED_TEXT else Colours.UNSELECTED_TEXT, Colours.SELECTED_TEXT, hoverValue), false)
+			gfx.text(font, group.name, cursorX, tabY, blend(if (enabled) Colours.ENABLED_TEXT else Colours.UNSELECTED_TEXT, Colours.SELECTED_TEXT, hoverValue), false)
 			val underline = (font.width(group.name) * selectValue).roundToInt()
 			if (underline > 0) fill(gfx, cursorX, y + 91, cursorX + underline, y + 93, Colours.SELECTED)
 
@@ -488,7 +493,7 @@ private class RsmStylePanel {
 	}
 
 	private fun renderGroupSettings(
-		gfx: GuiGraphics,
+		gfx: GuiGraphicsExtractor,
 		module: CgcModule,
 		group: GroupSetting<*>?,
 		x: Int,
@@ -503,7 +508,7 @@ private class RsmStylePanel {
 		settingsBounds = Bounds(startX - 8, startY - 12, width, height + 20)
 
 		if (group == null) {
-			gfx.drawString(font(), "No settings", startX, startY, Colours.UNSELECTED_TEXT, false)
+			gfx.text(font(), "No settings", startX, startY, Colours.UNSELECTED_TEXT, false)
 			return
 		}
 
@@ -517,7 +522,7 @@ private class RsmStylePanel {
 		settingsScroll[scrollKey] = scroll
 
 		if (settings.isEmpty()) {
-			gfx.drawString(font(), "No settings", startX, startY, Colours.UNSELECTED_TEXT, false)
+			gfx.text(font(), "No settings", startX, startY, Colours.UNSELECTED_TEXT, false)
 			return
 		}
 
@@ -542,13 +547,13 @@ private class RsmStylePanel {
 		gfx.disableScissor()
 
 		if (columns > 2) {
-			gfx.drawString(font(), "${rows.size} settings", startX + width - 88, y + panelHeightPixels - 62, Colours.UNSELECTED_TEXT, false)
+			gfx.text(font(), "${rows.size} settings", startX + width - 88, y + panelHeightPixels - 62, Colours.UNSELECTED_TEXT, false)
 		}
 	}
 
-	private fun renderSetting(gfx: GuiGraphics, row: SettingRow, mouseX: Int, mouseY: Int) {
+	private fun renderSetting(gfx: GuiGraphicsExtractor, row: SettingRow, mouseX: Int, mouseY: Int) {
 		val setting = row.setting
-		gfx.drawString(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
+		gfx.text(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
 
 		when (setting) {
 			is BooleanSetting -> renderBoolean(gfx, row, setting, mouseX, mouseY)
@@ -558,14 +563,14 @@ private class RsmStylePanel {
 			is StringSetting -> renderString(gfx, row, setting)
 			is KeybindSetting -> renderKeybind(gfx, row, setting)
 			is ButtonSetting -> renderButton(gfx, row, setting)
-			is ColourSetting -> renderColour(gfx, row, setting)
+			is ColourSetting -> renderColour(gfx, row, setting, mouseX, mouseY)
 			is SaveSetting<*> -> renderSave(gfx, row, setting)
-			is SoundSetting -> gfx.drawString(font(), fit(font(), "${setting.value} ${setting.volume}x", 170), row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
-			else -> gfx.drawString(font(), fit(font(), setting.displayValue, 170), row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
+			is SoundSetting -> gfx.text(font(), fit(font(), "${setting.value} ${setting.volume}x", 170), row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
+			else -> gfx.text(font(), fit(font(), setting.displayValue, 170), row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
 		}
 	}
 
-	private fun renderBoolean(gfx: GuiGraphics, row: SettingRow, setting: BooleanSetting, mouseX: Int, mouseY: Int) {
+	private fun renderBoolean(gfx: GuiGraphicsExtractor, row: SettingRow, setting: BooleanSetting, mouseX: Int, mouseY: Int) {
 		val boxX = row.x + CONTROL_X + 200 - 14
 		val boxY = row.y - 7
 		val hovered = Bounds(boxX, boxY, 14, 14).contains(mouseX.toDouble(), mouseY.toDouble())
@@ -579,13 +584,13 @@ private class RsmStylePanel {
 		})
 	}
 
-	private fun renderMode(gfx: GuiGraphics, row: SettingRow, setting: ModeSetting, mouseX: Int, mouseY: Int) {
+	private fun renderMode(gfx: GuiGraphicsExtractor, row: SettingRow, setting: ModeSetting, mouseX: Int, mouseY: Int) {
 		val expanded = expandedSettingKey == row.key
 		val boxX = row.x + CONTROL_X
 		val boxY = row.y - 10
 		drawInputBox(gfx, boxX, boxY, 200, 21, expanded)
-		gfx.drawString(font(), fit(font(), setting.value, 170), boxX + 5, row.y - 2, Colours.UNSELECTED_TEXT, false)
-		gfx.drawString(font(), if (expanded) "v" else ">", boxX + 187, row.y - 2, Colours.TEXT, false)
+		gfx.text(font(), fit(font(), setting.value, 170), boxX + 5, row.y - 2, Colours.UNSELECTED_TEXT, false)
+		gfx.text(font(), if (expanded) "v" else ">", boxX + 187, row.y - 2, Colours.TEXT, false)
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) expandedSettingKey = if (expanded) null else row.key
 		})
@@ -595,7 +600,7 @@ private class RsmStylePanel {
 		for (option in setting.values) {
 			val hovered = Bounds(boxX, optionY, 200, 18).contains(mouseX.toDouble(), mouseY.toDouble())
 			fill(gfx, boxX, optionY, boxX + 200, optionY + 18, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
-			gfx.drawString(font(), fit(font(), option, 188), boxX + 5, optionY + 5, if (option == setting.value) Colours.SELECTED else Colours.TEXT, false)
+			gfx.text(font(), fit(font(), option, 188), boxX + 5, optionY + 5, if (option == setting.value) Colours.SELECTED else Colours.TEXT, false)
 			hitboxes.add(Hitbox(boxX, optionY, 200, 18) { button ->
 				if (button == 0) {
 					setting.value = option
@@ -607,14 +612,14 @@ private class RsmStylePanel {
 		}
 	}
 
-	private fun renderMultiBool(gfx: GuiGraphics, row: SettingRow, setting: MultiBoolSetting, mouseX: Int, mouseY: Int) {
+	private fun renderMultiBool(gfx: GuiGraphicsExtractor, row: SettingRow, setting: MultiBoolSetting, mouseX: Int, mouseY: Int) {
 		val expanded = expandedSettingKey == row.key
 		val boxX = row.x + CONTROL_X
 		val boxY = row.y - 10
 		val text = setting.valuesList().joinToString(", ").ifBlank { "None" }
 		drawInputBox(gfx, boxX, boxY, 200, 21, expanded)
-		gfx.drawString(font(), fit(font(), text, 170), boxX + 5, row.y - 2, Colours.UNSELECTED_TEXT, false)
-		gfx.drawString(font(), if (expanded) "v" else ">", boxX + 187, row.y - 2, Colours.TEXT, false)
+		gfx.text(font(), fit(font(), text, 170), boxX + 5, row.y - 2, Colours.UNSELECTED_TEXT, false)
+		gfx.text(font(), if (expanded) "v" else ">", boxX + 187, row.y - 2, Colours.TEXT, false)
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) expandedSettingKey = if (expanded) null else row.key
 		})
@@ -624,7 +629,7 @@ private class RsmStylePanel {
 		for ((option, state) in setting.value) {
 			val hovered = Bounds(boxX, optionY, 200, 18).contains(mouseX.toDouble(), mouseY.toDouble())
 			fill(gfx, boxX, optionY, boxX + 200, optionY + 18, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
-			gfx.drawString(font(), fit(font(), option, 174), boxX + 5, optionY + 5, if (state) Colours.SELECTED else Colours.TEXT, false)
+			gfx.text(font(), fit(font(), option, 174), boxX + 5, optionY + 5, if (state) Colours.SELECTED else Colours.TEXT, false)
 			if (state) fill(gfx, boxX + 186, optionY + 6, boxX + 192, optionY + 12, Colours.SELECTED)
 			hitboxes.add(Hitbox(boxX, optionY, 200, 18) { button ->
 				if (button == 0) setting.toggle(option)
@@ -633,7 +638,7 @@ private class RsmStylePanel {
 		}
 	}
 
-	private fun renderNumber(gfx: GuiGraphics, row: SettingRow, setting: NumberSetting, mouseX: Int, mouseY: Int) {
+	private fun renderNumber(gfx: GuiGraphicsExtractor, row: SettingRow, setting: NumberSetting, mouseX: Int, mouseY: Int) {
 		val sliderX = row.x + CONTROL_X
 		val sliderY = row.y - 8
 		val inputX = sliderX + 150
@@ -649,9 +654,9 @@ private class RsmStylePanel {
 
 		fill(gfx, sliderX, sliderY, sliderX + 140, sliderY + 16, Colours.PANEL)
 		fill(gfx, sliderX + 2, sliderY + 2, sliderX + 2 + fillWidth, sliderY + 14, Colours.SELECTED)
-		gfx.drawCenteredString(font(), setting.displayValue, sliderX + 70, sliderY + 4, Colours.TEXT)
+		gfx.centeredText(font(), setting.displayValue, sliderX + 70, sliderY + 4, Colours.TEXT)
 		drawInputBox(gfx, inputX, sliderY, 50, 16, false)
-		gfx.drawCenteredString(font(), fit(font(), setting.valueAsString(), 42), inputX + 25, sliderY + 4, Colours.TEXT)
+		gfx.centeredText(font(), fit(font(), setting.valueAsString(), 42), inputX + 25, sliderY + 4, Colours.TEXT)
 
 		hitboxes.add(Hitbox(sliderX, sliderY, 140, 16) { button ->
 			if (button == 0) {
@@ -661,13 +666,13 @@ private class RsmStylePanel {
 		})
 	}
 
-	private fun renderString(gfx: GuiGraphics, row: SettingRow, setting: StringSetting) {
+	private fun renderString(gfx: GuiGraphicsExtractor, row: SettingRow, setting: StringSetting) {
 		val boxX = row.x + CONTROL_X
 		val boxY = row.y - 10
 		val focused = focusedString == setting
 		val text = if (setting.secure && !focused) "*".repeat(setting.value.length) else setting.value
 		drawInputBox(gfx, boxX, boxY, 200, 21, focused)
-		gfx.drawString(font(), fit(font(), text + if (focused) "|" else "", 188), boxX + 5, row.y - 2, Colours.TEXT, false)
+		gfx.text(font(), fit(font(), text + if (focused) "|" else "", 188), boxX + 5, row.y - 2, Colours.TEXT, false)
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) {
 				focusedString = setting
@@ -678,12 +683,12 @@ private class RsmStylePanel {
 		})
 	}
 
-	private fun renderKeybind(gfx: GuiGraphics, row: SettingRow, setting: KeybindSetting) {
+	private fun renderKeybind(gfx: GuiGraphicsExtractor, row: SettingRow, setting: KeybindSetting) {
 		val boxX = row.x + CONTROL_X
 		val boxY = row.y - 10
 		val waiting = waitingKeybind == setting
 		drawInputBox(gfx, boxX, boxY, 200, 21, waiting)
-		gfx.drawCenteredString(font(), fit(font(), if (waiting) "..." else setting.displayValue, 188), boxX + 100, row.y - 2, Colours.TEXT)
+		gfx.centeredText(font(), fit(font(), if (waiting) "..." else setting.displayValue, 188), boxX + 100, row.y - 2, Colours.TEXT)
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) {
 				waitingKeybind = setting
@@ -694,30 +699,82 @@ private class RsmStylePanel {
 		})
 	}
 
-	private fun renderButton(gfx: GuiGraphics, row: SettingRow, setting: ButtonSetting) {
+	private fun renderButton(gfx: GuiGraphicsExtractor, row: SettingRow, setting: ButtonSetting) {
 		val boxX = row.x + CONTROL_X
 		val boxY = row.y - 10
 		drawInputBox(gfx, boxX, boxY, 200, 21, false)
-		gfx.drawCenteredString(font(), fit(font(), setting.value, 188), boxX + 100, row.y - 2, Colours.TEXT)
+		gfx.centeredText(font(), fit(font(), setting.value, 188), boxX + 100, row.y - 2, Colours.TEXT)
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) setting.press()
 		})
 	}
 
-	private fun renderColour(gfx: GuiGraphics, row: SettingRow, setting: ColourSetting) {
+	private fun renderColour(gfx: GuiGraphicsExtractor, row: SettingRow, setting: ColourSetting, mouseX: Int, mouseY: Int) {
 		val boxX = row.x + CONTROL_X + 150
 		val boxY = row.y - 10
-		gfx.drawString(font(), setting.displayValue, row.x + CONTROL_X, row.y - 2, Colours.UNSELECTED_TEXT, false)
+		val expanded = expandedSettingKey == row.key
+		val drag = draggingColour
+		if (drag != null && drag.setting == setting) {
+			updateColourChannel(setting, drag.channel, mouseX, drag.sliderX, drag.sliderWidth)
+		}
+
+		gfx.text(font(), setting.displayValue, row.x + CONTROL_X, row.y - 2, Colours.UNSELECTED_TEXT, false)
 		fill(gfx, boxX, boxY, boxX + 50, boxY + 21, setting.value.argb())
-		drawRectOutline(gfx, boxX, boxY, 50, 21, Colours.GROUP_OUTLINE)
+		drawRectOutline(gfx, boxX, boxY, 50, 21, if (expanded) Colours.SELECTED else Colours.GROUP_OUTLINE)
 		hitboxes.add(Hitbox(boxX, boxY, 50, 21) { button ->
-			if (button == 1) setting.resetToDefault()
+			when (button) {
+				0 -> expandedSettingKey = if (expanded) null else row.key
+				1 -> setting.resetToDefault()
+			}
+		})
+
+		if (!expanded) {
+			return
+		}
+
+		val editorX = row.x + CONTROL_X
+		var editorY = row.y + 16
+		renderColourChannel(gfx, setting, ColourChannel.RED, "R", setting.value.red, editorX, editorY, mouseX)
+		editorY += 16
+		renderColourChannel(gfx, setting, ColourChannel.GREEN, "G", setting.value.green, editorX, editorY, mouseX)
+		editorY += 16
+		renderColourChannel(gfx, setting, ColourChannel.BLUE, "B", setting.value.blue, editorX, editorY, mouseX)
+		editorY += 16
+		renderColourChannel(gfx, setting, ColourChannel.ALPHA, "A", setting.value.alpha, editorX, editorY, mouseX)
+	}
+
+	private fun renderColourChannel(
+		gfx: GuiGraphicsExtractor,
+		setting: ColourSetting,
+		channel: ColourChannel,
+		label: String,
+		value: Int,
+		x: Int,
+		y: Int,
+		mouseX: Int
+	) {
+		val sliderX = x + 18
+		val sliderY = y
+		val sliderWidth = 140
+		val fillWidth = (136 * (value / 255.0)).roundToInt()
+
+		gfx.text(font(), label, x, y + 3, Colours.UNSELECTED_TEXT, false)
+		fill(gfx, sliderX, sliderY, sliderX + sliderWidth, sliderY + 13, Colours.PANEL)
+		fill(gfx, sliderX + 2, sliderY + 2, sliderX + 2 + fillWidth, sliderY + 11, channel.previewColour(value))
+		drawInputBox(gfx, sliderX + 150, sliderY, 32, 13, false)
+		gfx.centeredText(font(), value.toString(), sliderX + 166, sliderY + 2, Colours.TEXT)
+
+		hitboxes.add(Hitbox(sliderX, sliderY, sliderWidth, 13) { button ->
+			if (button == 0) {
+				draggingColour = ColourDrag(setting, channel, sliderX, sliderWidth)
+				updateColourChannel(setting, channel, mouseX, sliderX, sliderWidth)
+			}
 		})
 	}
 
-	private fun renderSave(gfx: GuiGraphics, row: SettingRow, setting: SaveSetting<*>) {
+	private fun renderSave(gfx: GuiGraphicsExtractor, row: SettingRow, setting: SaveSetting<*>) {
 		if (!setting.allowEdits) {
-			gfx.drawString(font(), fit(font(), setting.displayValue, 190), row.x + CONTROL_X, row.y - 2, Colours.UNSELECTED_TEXT, false)
+			gfx.text(font(), fit(font(), setting.displayValue, 190), row.x + CONTROL_X, row.y - 2, Colours.UNSELECTED_TEXT, false)
 			return
 		}
 
@@ -725,9 +782,9 @@ private class RsmStylePanel {
 		val boxY = row.y - 10
 		val focused = focusedSave == setting
 		drawInputBox(gfx, boxX, boxY, 140, 21, focused)
-		gfx.drawString(font(), fit(font(), setting.fileName + if (focused) "|" else "", 128), boxX + 5, row.y - 2, Colours.TEXT, false)
+		gfx.text(font(), fit(font(), setting.fileName + if (focused) "|" else "", 128), boxX + 5, row.y - 2, Colours.TEXT, false)
 		drawInputBox(gfx, boxX + 150, boxY, 50, 21, false)
-		gfx.drawCenteredString(font(), "Load", boxX + 175, row.y - 2, Colours.TEXT)
+		gfx.centeredText(font(), "Load", boxX + 175, row.y - 2, Colours.TEXT)
 		hitboxes.add(Hitbox(boxX, boxY, 140, 21) { button ->
 			if (button == 0) {
 				focusedSave = setting
@@ -797,7 +854,7 @@ private class RsmStylePanel {
 	}
 
 	private fun isExpanded(setting: Setting<*>, key: String): Boolean =
-		expandedSettingKey == key && (setting is ModeSetting || setting is MultiBoolSetting)
+		expandedSettingKey == key && (setting is ModeSetting || setting is MultiBoolSetting || setting is ColourSetting)
 
 	private fun selectedSettingScrollKey(): String {
 		val module = selectedModules[selectedCategory] ?: return ""
@@ -837,12 +894,22 @@ private class RsmStylePanel {
 		setting.setValue(rounded)
 	}
 
-	private fun drawInputBox(gfx: GuiGraphics, x: Int, y: Int, width: Int, height: Int, active: Boolean) {
+	private fun updateColourChannel(setting: ColourSetting, channel: ColourChannel, mouseX: Int, sliderX: Int, sliderWidth: Int) {
+		val value = (((mouseX - sliderX).toDouble() / sliderWidth).coerceIn(0.0, 1.0) * 255.0).roundToInt()
+		when (channel) {
+			ColourChannel.RED -> setting.setColour(red = value)
+			ColourChannel.GREEN -> setting.setColour(green = value)
+			ColourChannel.BLUE -> setting.setColour(blue = value)
+			ColourChannel.ALPHA -> setting.setColour(alpha = value)
+		}
+	}
+
+	private fun drawInputBox(gfx: GuiGraphicsExtractor, x: Int, y: Int, width: Int, height: Int, active: Boolean) {
 		fill(gfx, x, y, x + width, y + height, if (active) Colours.WRITING_TEXT else Colours.PANEL)
 		drawRectOutline(gfx, x, y, width, height, if (active) Colours.SELECTED else Colours.GROUP_OUTLINE)
 	}
 
-	private fun drawRectOutline(gfx: GuiGraphics, x: Int, y: Int, width: Int, height: Int, color: Int) {
+	private fun drawRectOutline(gfx: GuiGraphicsExtractor, x: Int, y: Int, width: Int, height: Int, color: Int) {
 		if (width <= 1 || height <= 1) return
 		fill(gfx, x, y, x + width, y + 1, color)
 		fill(gfx, x, y + height - 1, x + width, y + height, color)
@@ -851,7 +918,7 @@ private class RsmStylePanel {
 	}
 
 	private fun fill(
-		gfx: GuiGraphics,
+		gfx: GuiGraphicsExtractor,
 		x1: Int,
 		y1: Int,
 		x2: Int,
@@ -862,11 +929,11 @@ private class RsmStylePanel {
 		gfx.fill(x1, y1, x2, y2, if (applyOpacity) surface(color) else color)
 	}
 
-	private fun enableScissor(gfx: GuiGraphics, x1: Int, y1: Int, x2: Int, y2: Int) {
+	private fun enableScissor(gfx: GuiGraphicsExtractor, x1: Int, y1: Int, x2: Int, y2: Int) {
 		gfx.enableScissor(x1, y1, x2, y2)
 	}
 
-	private fun drawLineApprox(gfx: GuiGraphics, x1: Int, y1: Int, x2: Int, y2: Int, color: Int) {
+	private fun drawLineApprox(gfx: GuiGraphicsExtractor, x1: Int, y1: Int, x2: Int, y2: Int, color: Int) {
 		val steps = max(abs(x2 - x1), abs(y2 - y1)).coerceAtLeast(1)
 		for (i in 0..steps step 3) {
 			val x = x1 + ((x2 - x1) * i / steps.toFloat()).roundToInt()
@@ -935,6 +1002,13 @@ private class RsmStylePanel {
 		val key: String = "$moduleId:$groupName:${setting.name}"
 	}
 
+	private data class ColourDrag(
+		val setting: ColourSetting,
+		val channel: ColourChannel,
+		val sliderX: Int,
+		val sliderWidth: Int
+	)
+
 	private companion object {
 		private const val WIDTH = 650
 		private const val HEIGHT = 470
@@ -975,6 +1049,21 @@ private data class Bounds(
 	companion object {
 		val ZERO = Bounds(0, 0, 0, 0)
 	}
+}
+
+private enum class ColourChannel {
+	RED,
+	GREEN,
+	BLUE,
+	ALPHA;
+
+	fun previewColour(value: Int): Int =
+		when (this) {
+			RED -> Colours.argb(255, value, 32, 32)
+			GREEN -> Colours.argb(255, 32, value, 32)
+			BLUE -> Colours.argb(255, 32, 32, value)
+			ALPHA -> Colours.argb(value, 180, 180, 180)
+		}
 }
 
 private object Colours {

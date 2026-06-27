@@ -1,0 +1,166 @@
+package cgc.cgc.dungeon
+
+import cgc.cgc.data.DungeonClass
+import cgc.cgc.data.DungeonPlayer
+import cgc.cgc.location.Floor
+import cgc.cgc.location.Island
+import cgc.cgc.location.Location
+import cgc.cgc.utils.DungeonUtils
+import net.minecraft.ChatFormatting
+import net.minecraft.client.Minecraft
+import net.minecraft.client.multiplayer.ClientLevel
+import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket
+import net.minecraft.world.entity.player.Player
+import net.minecraft.world.phys.Vec3
+import java.util.Locale
+import java.util.regex.Pattern
+
+object DungeonState {
+	private val tabListPattern = Pattern.compile("^\\[(?<sbLevel>\\d+)] (?:\\[?\\w+] )*(?<name>\\w+) .*?\\((?<class>\\w+)(?: (?<classLevel>\\w+))*\\)$")
+	private val players = linkedSetOf<DungeonPlayer>()
+
+	@JvmStatic
+	var started: Boolean = false
+		private set
+
+	@JvmStatic
+	var inBoss: Boolean = false
+		private set
+
+	@JvmStatic
+	fun reset() {
+		started = false
+		inBoss = false
+		players.clear()
+	}
+
+	@JvmStatic
+	fun tick(client: Minecraft) {
+		val player = client.player ?: return
+		if (!Location.area.isArea(Island.DUNGEON)) {
+			inBoss = false
+			return
+		}
+
+		inBoss = isInBossArea(Location.floor, player.position())
+		players.forEach { it.findPlayer() }
+	}
+
+	@JvmStatic
+	fun handleChat(message: String) {
+		val text = ChatFormatting.stripFormatting(message)?.trim() ?: message.trim()
+		if (text.startsWith("[NPC] Mort: Here, I found this map when I first entered the dungeon.")) {
+			started = true
+			inBoss = false
+			return
+		}
+
+		if (text.startsWith("[BOSS]")) {
+			inBoss = Location.area.isArea(Island.DUNGEON)
+		}
+	}
+
+	@JvmStatic
+	fun handlePlayerInfo(packet: ClientboundPlayerInfoUpdatePacket) {
+		if (!Location.area.isArea(Island.DUNGEON)) {
+			return
+		}
+
+		val level = Minecraft.getInstance().level ?: return
+		for (entry in packet.entries()) {
+			val displayName = entry.displayName() ?: continue
+			val text = ChatFormatting.stripFormatting(displayName.string.trim()) ?: continue
+			val matcher = tabListPattern.matcher(text)
+			if (!matcher.find()) {
+				continue
+			}
+
+			val name = matcher.group("name")
+			val clazz = DungeonClass.findClassString(matcher.group("class"))
+			val classLevel = parseClassLevel(matcher.group("classLevel"))
+			val player = findLevelPlayer(level, name)
+			if (player == null) {
+				getPlayer(name)?.update(clazz, classLevel)
+				continue
+			}
+
+			val existing = getPlayer(player)
+			if (existing == null) {
+				players.add(DungeonPlayer(clazz, player, classLevel, 0))
+			} else {
+				existing.update(clazz, classLevel)
+			}
+		}
+	}
+
+	@JvmStatic
+	fun getPlayers(): Set<DungeonPlayer> =
+		players.toSet()
+
+	@JvmStatic
+	fun getMyPlayer(): DungeonPlayer? {
+		val local = Minecraft.getInstance().player ?: return null
+		return players.firstOrNull { it.name.equals(local.name.string, ignoreCase = true) }
+	}
+
+	@JvmStatic
+	fun getPlayer(name: String): DungeonPlayer? =
+		players.firstOrNull { it.name.equals(name, ignoreCase = true) }
+
+	@JvmStatic
+	fun getPlayer(player: Player): DungeonPlayer? =
+		players.firstOrNull { it.player == player || it.name.equals(player.name.string, ignoreCase = true) }
+
+	@JvmStatic
+	fun getClassPlayer(clazz: DungeonClass): DungeonPlayer? =
+		players.firstOrNull { it.dungeonClass.sameClass(clazz) }
+
+	@JvmStatic
+	fun getClassPlayer(index: Int): DungeonPlayer? =
+		getClassPlayer(
+			when (index) {
+				0 -> DungeonClass.ARCHER
+				1 -> DungeonClass.MAGE
+				2 -> DungeonClass.BERSERKER
+				3 -> DungeonClass.HEALER
+				4 -> DungeonClass.TANK
+				else -> DungeonClass.NONE
+			}
+		)
+
+	private fun isInBossArea(floor: Floor, pos: Vec3): Boolean =
+		when (floor) {
+			Floor.F1, Floor.M1 -> pos.x > -70.0 && pos.z > -40.0
+			Floor.F2, Floor.M2, Floor.F3, Floor.M3, Floor.F4, Floor.M4 -> pos.x > -40.0 && pos.z > -40.0
+			Floor.F5, Floor.M5, Floor.F6, Floor.M6 -> pos.x > -40.0 && pos.z > -8.0
+			Floor.F7, Floor.M7 -> DungeonUtils.isPositionInF7Boss(pos)
+			else -> false
+		}
+
+	private fun findLevelPlayer(level: ClientLevel, name: String): Player? =
+		level.players().firstOrNull { it.name.string.equals(name, ignoreCase = true) }
+
+	private fun parseClassLevel(raw: String?): Int {
+		if (raw.isNullOrBlank()) {
+			return 0
+		}
+
+		return raw.toIntOrNull() ?: romanToInt(raw.uppercase(Locale.ROOT))
+	}
+
+	private fun romanToInt(value: String): Int {
+		val numerals = mapOf('I' to 1, 'V' to 5, 'X' to 10, 'L' to 50, 'C' to 100)
+		var total = 0
+		var previous = 0
+		for (char in value.reversed()) {
+			val current = numerals[char] ?: return 0
+			if (current < previous) {
+				total -= current
+			} else {
+				total += current
+				previous = current
+			}
+		}
+		return total
+	}
+}

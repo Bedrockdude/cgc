@@ -60,6 +60,19 @@ Use this file as the high-level map from feature to owning files in `cgc`.
 - Related example references:
   - `../Example Skyblock mods/RSZ/src/main/java/com/Bedrock/module/impl/dungeon/AutoSSSpecsafe.java`
 
+### Runtime 3D Renderer
+
+- Owner files:
+  - `src/main/kotlin/cgc/cgc/runtime/CgcRenderer3D.kt`
+  - `src/main/kotlin/cgc/cgc/client/CgcClient.kt`
+- Responsibility:
+  - queued 3D box rendering for modules that need RSM-style outline and filled-outline tasks
+  - flushes queued tasks after module world rendering
+- Related example references:
+  - `../Example Skyblock mods/rsm-1.0.0/rsm-1.0.0/src/main/java/com/ricedotwho/rsm/component/impl/Renderer3D.java`
+  - `../Example Skyblock mods/rsm-1.0.0/rsm-1.0.0/src/main/java/com/ricedotwho/rsm/utils/render/render3d/VertexRenderer.java`
+  - `../Example Skyblock mods/rsm-1.0.0/rsm-1.0.0/src/main/java/com/ricedotwho/rsm/utils/render/render3d/type/`
+
 ## Planned Features
 
 Add sections as the mod grows:

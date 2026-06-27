@@ -17,6 +17,7 @@ enum class AimMode {
 	NORMAL_BUTTON,
 	CHAINED_RETARGET,
 	PRE_AIM,
+	WAIT_CORRECTION,
 	PRACTICE,
 	PRACTICE_RETURN
 }
@@ -103,15 +104,17 @@ class SimonSaysAimController {
 		val planSettings = settings.coerced()
 		val practiceReturnMode = mode == AimMode.PRACTICE_RETURN
 		val practiceMode = mode == AimMode.PRACTICE || mode == AimMode.PRACTICE_RETURN
+		val waitCorrectionMode = mode == AimMode.WAIT_CORRECTION
 		val band = AimDistanceBand.fromDistance(angularDistance)
 		val velocityProfile = band.velocityProfile()
 		val durationMs = planDurationMs(angularDistance, band, mode, planSettings, random)
 		val eyeDistance = max(MIN_TARGET_EYE_DISTANCE, player.eyePosition.distanceTo(target))
-		val overshootAmount = if (practiceMode) 0.0 else overshootAmount(angularDistance, eyeDistance, band, planSettings, random)
+		val overshootAmount = if (practiceMode || waitCorrectionMode) 0.0 else overshootAmount(angularDistance, eyeDistance, band, planSettings, random)
 		val motionDirection = directionOrZero(yawDelta.toDouble(), pitchDelta.toDouble(), angularDistance)
 		val perpendicular = perpendicular(motionDirection, random.sign())
 		val overshootDirection = overshootDirection(motionDirection, perpendicular, overshootAmount, band, random)
 		val curveAmount = when {
+			waitCorrectionMode -> 0.0
 			mode == AimMode.PRACTICE -> practiceCurveAmount(angularDistance, band, planSettings, random)
 			practiceReturnMode -> returnCurveAmount(angularDistance, band, planSettings, random)
 			else -> curveAmount(angularDistance, band, planSettings, random)
@@ -136,6 +139,7 @@ class SimonSaysAimController {
 			clickReadyAtMs(adjustedDurationMs, correctionDurationMs, settleDurationMs, overshootAmount)
 		}
 		val shake = when {
+			waitCorrectionMode -> waitCorrectionShakeAmplitudes(angularDistance, band, planSettings, random)
 			mode == AimMode.PRACTICE -> practiceShakeAmplitudes(angularDistance, band, planSettings, random)
 			practiceReturnMode -> returnShakeAmplitudes(angularDistance, band, planSettings, random)
 			else -> shakeAmplitudes(angularDistance, band, planSettings, random)
@@ -267,6 +271,9 @@ class SimonSaysAimController {
 
 	private fun movementProgress(plan: AimPlan, rawProgress: Double): Double {
 		val progress = rawProgress.coerceIn(0.0, 1.0)
+		if (plan.mode == AimMode.WAIT_CORRECTION) {
+			return lerp(progress, smootherStep(progress), 0.72).coerceIn(0.0, 1.0)
+		}
 		if (plan.mode == AimMode.PRACTICE) {
 			return lerp(progress, smootherStep(progress), 0.32).coerceIn(0.0, 1.0)
 		}
@@ -452,12 +459,14 @@ class SimonSaysAimController {
 		val maxAmplitude = when (plan.mode) {
 			AimMode.PRACTICE_RETURN -> MAX_RETURN_ARRIVAL_SHAKE_DEGREES
 			AimMode.PRACTICE -> MAX_PRACTICE_ARRIVAL_SHAKE_DEGREES
+			AimMode.WAIT_CORRECTION -> MAX_WAIT_CORRECTION_ARRIVAL_SHAKE_DEGREES
 			AimMode.PRE_AIM -> MAX_PRE_AIM_ARRIVAL_SHAKE_DEGREES
 			else -> MAX_CLICK_ARRIVAL_SHAKE_DEGREES
 		}
 		val floorAmplitude = when (plan.mode) {
 			AimMode.PRACTICE_RETURN -> 0.016
 			AimMode.PRACTICE -> 0.012
+			AimMode.WAIT_CORRECTION -> 0.004
 			AimMode.PRE_AIM -> 0.010
 			else -> 0.006
 		}
@@ -496,6 +505,7 @@ class SimonSaysAimController {
 			AimMode.NORMAL_BUTTON -> 1.0
 			AimMode.CHAINED_RETARGET -> 0.9
 			AimMode.PRE_AIM -> 1.03
+			AimMode.WAIT_CORRECTION -> 2.35
 			AimMode.PRACTICE -> practiceDurationScale(band)
 			AimMode.PRACTICE_RETURN -> 0.74
 		}
@@ -719,6 +729,26 @@ class SimonSaysAimController {
 		return ShakeAmplitudes(travelYaw, travelPitch, 0.0, 0.0)
 	}
 
+	private fun waitCorrectionShakeAmplitudes(
+		distance: Double,
+		band: AimDistanceBand,
+		settings: AimSettings,
+		random: Random
+	): ShakeAmplitudes {
+		val randomnessScale = 0.32 + settings.randomness * 0.28
+		val base = when (band) {
+			AimDistanceBand.TINY -> lerp(0.0, 0.002, (distance / TINY_DISTANCE).coerceIn(0.0, 1.0))
+			AimDistanceBand.SMALL -> lerp(0.003, 0.010, ((distance - TINY_DISTANCE) / (SMALL_DISTANCE - TINY_DISTANCE)).coerceIn(0.0, 1.0))
+			AimDistanceBand.MEDIUM -> lerp(0.012, 0.024, ((distance - SMALL_DISTANCE) / (MEDIUM_DISTANCE - SMALL_DISTANCE)).coerceIn(0.0, 1.0))
+			AimDistanceBand.LARGE -> lerp(0.026, 0.040, ((distance - MEDIUM_DISTANCE) / LARGE_DISTANCE_RANGE).coerceIn(0.0, 1.0))
+		}
+		val travelYaw = (base * randomnessScale * random.between(0.78, 1.12))
+			.coerceAtMost(MAX_WAIT_CORRECTION_TRAVEL_SHAKE_DEGREES)
+		val travelPitch = (travelYaw * random.between(0.38, 0.58))
+			.coerceAtMost(MAX_WAIT_CORRECTION_TRAVEL_SHAKE_DEGREES * 0.58)
+		return ShakeAmplitudes(travelYaw, travelPitch, 0.0, 0.0)
+	}
+
 	private fun overshootHoldDurationMs(overshootAmount: Double, band: AimDistanceBand, random: Random): Long {
 		if (overshootAmount <= 0.0) {
 			return 0L
@@ -915,7 +945,7 @@ class SimonSaysAimController {
 		private const val MAX_OVERSHOOT_DISTANCE_FRACTION = 0.34
 		private const val MAX_CURVE_DISTANCE_FRACTION = 0.08
 		private const val MAX_RETURN_CURVE_DISTANCE_FRACTION = 0.036
-		private const val MAX_PRACTICE_CURVE_DISTANCE_FRACTION = 0.068
+		private const val MAX_PRACTICE_CURVE_DISTANCE_FRACTION = 0.268
 		private const val MIN_DURATION_MS = 24L
 		private const val MAX_DURATION_MS = 360L
 		private const val MIN_APPROACH_MS = 22L
@@ -924,13 +954,15 @@ class SimonSaysAimController {
 		private const val SETTLE_DRIFT_SCALE = 0.055f
 		private const val CORRECTION_CURVE_SCALE = 0.2
 		private const val MAX_TRAVEL_SHAKE_DEGREES = 0.2
-		private const val MAX_PRACTICE_TRAVEL_SHAKE_DEGREES = 0.07
+		private const val MAX_PRACTICE_TRAVEL_SHAKE_DEGREES = 0.62
 		private const val MAX_RETURN_TRAVEL_SHAKE_DEGREES = 0.12
+		private const val MAX_WAIT_CORRECTION_TRAVEL_SHAKE_DEGREES = 0.045
 		private const val ARRIVAL_SHAKE_DURATION_MS = 240L
-		private const val MAX_CLICK_ARRIVAL_SHAKE_DEGREES = 0.026
-		private const val MAX_PRE_AIM_ARRIVAL_SHAKE_DEGREES = 0.034
-		private const val MAX_PRACTICE_ARRIVAL_SHAKE_DEGREES = 0.040
-		private const val MAX_RETURN_ARRIVAL_SHAKE_DEGREES = 0.054
+		private const val MAX_CLICK_ARRIVAL_SHAKE_DEGREES = 0.021
+		private const val MAX_PRE_AIM_ARRIVAL_SHAKE_DEGREES = 0.024
+		private const val MAX_WAIT_CORRECTION_ARRIVAL_SHAKE_DEGREES = 0.012
+		private const val MAX_PRACTICE_ARRIVAL_SHAKE_DEGREES = 0.195
+		private const val MAX_RETURN_ARRIVAL_SHAKE_DEGREES = 0.034
 		private const val MAX_SETTLE_SHAKE_DEGREES = 0.046
 		private const val MAX_HOLD_SHAKE_DEGREES = 0.024
 		private const val HOLD_SHAKE_PITCH_SCALE = 0.72

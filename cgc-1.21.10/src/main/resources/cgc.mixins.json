@@ -1,12 +1,21 @@
 {
 	"required": true,
 	"package": "cgc.cgc.mixin",
-	"compatibilityLevel": "JAVA_21",
+	"compatibilityLevel": "JAVA_25",
 	"mixins": [
 		"ExampleMixin"
 	],
 	"client": [
-		"ClientPacketListenerMixin"
+		"AbstractContainerScreenMixin",
+		"ChatScreenMixin",
+		"ClientPacketListenerMixin",
+		"CommandSuggestionsMixin",
+		"ConnectionPacketMixin",
+		"DeltaTrackerFreezeMixin",
+		"FontNickHiderMixin",
+		"MinecraftTickFreezeMixin",
+		"PlayerDestroySpeedMixin",
+		"accessor.AccessorAbstractContainerScreen"
 	],
 	"injectors": {
 		"defaultRequire": 1

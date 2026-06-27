@@ -17,6 +17,14 @@ class Keybind(
 		action?.invoke()
 	}
 
+	fun isDown(window: Window): Boolean {
+		val key = runCatching { InputConstants.getKey(keyName) }.getOrNull() ?: return false
+		if (key == InputConstants.UNKNOWN) {
+			return false
+		}
+		return InputConstants.isKeyDown(window, key.value)
+	}
+
 	fun tick(window: Window) {
 		val key = runCatching { InputConstants.getKey(keyName) }.getOrNull() ?: return
 		if (key == InputConstants.UNKNOWN) {

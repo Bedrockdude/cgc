@@ -2,7 +2,7 @@ package cgc.cgc
 
 import cgc.cgc.module.CgcModules
 import net.fabricmc.api.ModInitializer
-import net.minecraft.resources.ResourceLocation
+import net.minecraft.resources.Identifier
 import org.slf4j.LoggerFactory
 
 object Cgc : ModInitializer {
@@ -15,6 +15,6 @@ object Cgc : ModInitializer {
 		LOGGER.info("Initialized CGC.")
 	}
 
-	fun id(path: String): ResourceLocation
-		= ResourceLocation.fromNamespaceAndPath(MOD_ID, path)
+	fun id(path: String): Identifier
+		= Identifier.fromNamespaceAndPath(MOD_ID, path)
 }

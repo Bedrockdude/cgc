@@ -18,13 +18,13 @@ import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ColourSetting
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.NumberSetting
+import cgc.cgc.runtime.CgcRenderPrimitives
 import cgc.cgc.utils.DungeonUtils
-import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
-import net.minecraft.client.gui.GuiGraphics
+import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.multiplayer.ClientLevel
-import net.minecraft.client.renderer.RenderType
-import net.minecraft.client.renderer.ShapeRenderer
+import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
 import net.minecraft.world.InteractionHand
@@ -143,7 +143,7 @@ class SSTriggerBot : CgcModule(
 		}
 	}
 
-	override fun onWorldRenderExtract(context: WorldRenderContext) {
+	override fun onWorldRenderExtract(context: LevelRenderContext) {
 		val client = Minecraft.getInstance()
 		if (!areaCheck() || client.player == null || client.level == null) {
 			return
@@ -167,7 +167,7 @@ class SSTriggerBot : CgcModule(
 		}
 	}
 
-	override fun onHudRender(gfx: GuiGraphics) {
+	override fun onHudRender(gfx: GuiGraphicsExtractor) {
 		if (!donePopup.value || System.currentTimeMillis() > donePopupUntil) {
 			return
 		}
@@ -186,7 +186,7 @@ class SSTriggerBot : CgcModule(
 			centerY + client.font.lineHeight / 2 + boxPaddingY,
 			0xAA000000.toInt()
 		)
-		gfx.drawCenteredString(client.font, text, centerX, centerY - client.font.lineHeight / 2, 0xFF55FF55.toInt())
+		gfx.centeredText(client.font, text, centerX, centerY - client.font.lineHeight / 2, 0xFF55FF55.toInt())
 	}
 
 	override fun onWorldLoad() {
@@ -318,18 +318,18 @@ class SSTriggerBot : CgcModule(
 			else -> restButtonColor.value
 		}
 
-	private fun renderButtonWireframe(context: WorldRenderContext, level: ClientLevel, pos: BlockPos, color: Colour) {
+	private fun renderButtonWireframe(context: LevelRenderContext, level: ClientLevel, pos: BlockPos, color: Colour) {
 		val state = level.getBlockState(pos)
 		val shape: VoxelShape = getVanillaButtonShape(state) ?: return
 		if (!shape.isEmpty) {
-			val camera = Minecraft.getInstance().gameRenderer.mainCamera.position
+			val camera = Minecraft.getInstance().gameRenderer.mainCamera.position()
 			val box = shape.bounds().move(pos)
-			val matrices = context.matrices()
+			val matrices = context.poseStack()
 			matrices.pushPose()
 			matrices.translate(-camera.x, -camera.y, -camera.z)
-			ShapeRenderer.renderLineBox(
-				matrices.last(),
-				context.consumers().getBuffer(RenderType.lines()),
+			CgcRenderPrimitives.lineBox(
+				matrices,
+				context.bufferSource().getBuffer(RenderTypes.lines()),
 				box,
 				color.red / 255.0f,
 				color.green / 255.0f,
@@ -386,7 +386,7 @@ class SSTriggerBot : CgcModule(
 	}
 
 	private fun chat(message: String) {
-		Minecraft.getInstance().player?.displayClientMessage(Component.literal(message), false)
+		Minecraft.getInstance().player?.sendSystemMessage(Component.literal(message))
 	}
 
 	private companion object {
