@@ -100,7 +100,7 @@ public class CommandSuggestionsMixin {
 
 	/**
 	 * @author CGC
-	 * @reason Use CGC's local Brigadier dispatcher for prefixed chat commands so .lc/.bbg autocomplete like RSM commands.
+	 * @reason Use CGC's local Brigadier dispatcher for prefixed chat commands so .lc autocompletes like an RSM command.
 	 */
 	@Overwrite
 	public void updateCommandInfo() {

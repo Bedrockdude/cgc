@@ -9,10 +9,15 @@ import net.minecraft.client.renderer.MultiBufferSource
 import net.minecraft.client.renderer.rendertype.RenderType
 import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.world.phys.AABB
+import net.minecraft.world.phys.Vec3
+import kotlin.math.cos
+import kotlin.math.sin
 
 object CgcRenderer3D {
 	private val lineTasks = arrayListOf<BoxTask>()
+	private val circleTasks = arrayListOf<CircleTask>()
 	private val filledTasks = arrayListOf<BoxTask>()
+	private val circleCache = hashMapOf<Int, CircleData>()
 
 	fun outlineBox(aabb: AABB, colour: Colour, depth: Boolean) {
 		lineTasks.add(BoxTask(aabb, colour, depth))
@@ -27,8 +32,15 @@ object CgcRenderer3D {
 		outlineBox(aabb, outline, depth)
 	}
 
+	fun circle(pos: Vec3, depth: Boolean, radius: Float, colour: Colour, slices: Int) {
+		if (radius <= 0.0f || slices < 3) {
+			return
+		}
+		circleTasks.add(CircleTask(pos, depth, radius, colour, slices))
+	}
+
 	fun render(context: LevelRenderContext) {
-		if (lineTasks.isEmpty() && filledTasks.isEmpty()) {
+		if (lineTasks.isEmpty() && circleTasks.isEmpty() && filledTasks.isEmpty()) {
 			return
 		}
 
@@ -48,6 +60,7 @@ object CgcRenderer3D {
 
 	fun clear() {
 		lineTasks.clear()
+		circleTasks.clear()
 		filledTasks.clear()
 	}
 
@@ -57,14 +70,18 @@ object CgcRenderer3D {
 	}
 
 	private fun renderLineBatch(source: MultiBufferSource.BufferSource, stack: PoseStack, type: RenderType, depth: Boolean) {
-		val tasks = lineTasks.filter { it.depth == depth }
-		if (tasks.isEmpty()) {
+		val boxes = lineTasks.filter { it.depth == depth }
+		val circles = circleTasks.filter { it.depth == depth }
+		if (boxes.isEmpty() && circles.isEmpty()) {
 			return
 		}
 
 		val buffer = source.getBuffer(type)
-		for (task in tasks) {
+		for (task in boxes) {
 			renderOutlineBox(stack.last(), buffer, task.aabb, task.colour)
+		}
+		for (task in circles) {
+			renderCircle(stack.last(), buffer, task)
 		}
 		source.endBatch(type)
 	}
@@ -163,7 +180,59 @@ object CgcRenderer3D {
 		buffer.addVertex(matrix, maxX, maxY, maxZ).setColor(color)
 	}
 
+	private fun renderCircle(pose: PoseStack.Pose, buffer: VertexConsumer, task: CircleTask) {
+		val data = circleCache.getOrPut(task.slices) { CircleData(task.slices) }
+		val matrix = pose.pose()
+		val alpha = task.colour.alpha / 255.0f
+		val red = task.colour.red / 255.0f
+		val green = task.colour.green / 255.0f
+		val blue = task.colour.blue / 255.0f
+		val y = task.pos.y.toFloat()
+
+		for (i in 0 until task.slices) {
+			val next = (i + 1) % task.slices
+			val x1 = task.pos.x.toFloat() + data.x[i] * task.radius
+			val z1 = task.pos.z.toFloat() + data.z[i] * task.radius
+			val x2 = task.pos.x.toFloat() + data.x[next] * task.radius
+			val z2 = task.pos.z.toFloat() + data.z[next] * task.radius
+			val nx = data.nx[i]
+			val nz = data.nz[i]
+
+			buffer.addVertex(matrix, x1, y, z1)
+				.setColor(red, green, blue, alpha)
+				.setNormal(nx, 0.0f, nz)
+				.setLineWidth(LINE_WIDTH)
+			buffer.addVertex(matrix, x2, y, z2)
+				.setColor(red, green, blue, alpha)
+				.setNormal(nx, 0.0f, nz)
+				.setLineWidth(LINE_WIDTH)
+		}
+	}
+
 	private data class BoxTask(val aabb: AABB, val colour: Colour, val depth: Boolean)
+	private data class CircleTask(val pos: Vec3, val depth: Boolean, val radius: Float, val colour: Colour, val slices: Int)
+
+	private class CircleData(slices: Int) {
+		val x = FloatArray(slices)
+		val z = FloatArray(slices)
+		val nx = FloatArray(slices)
+		val nz = FloatArray(slices)
+
+		init {
+			val step = (Math.PI * 2.0 / slices).toFloat()
+			for (i in 0 until slices) {
+				val angle = i * step
+				x[i] = cos(angle)
+				z[i] = sin(angle)
+			}
+
+			for (i in 0 until slices) {
+				val next = (i + 1) % slices
+				nx[i] = x[next] - x[i]
+				nz[i] = z[next] - z[i]
+			}
+		}
+	}
 
 	private val EDGE_PAIRS = intArrayOf(
 		0, 1,

@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.regex.Pattern
 
 class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
-	private val fakeName = StringSetting("Name", ":)", allowBlank = false, maxLength = 32)
+	private val fakeName = StringSetting("Name", "", allowBlank = true, maxLength = 64)
 
 	init {
 		instance = this

@@ -18,6 +18,7 @@ import cgc.cgc.module.setting.ColourSetting
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.module.setting.SaveSetting
+import cgc.cgc.runtime.CgcRenderer3D
 import cgc.cgc.utils.ChatUtils
 import cgc.cgc.utils.ItemUtils
 import com.google.gson.reflect.TypeToken
@@ -29,14 +30,11 @@ import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket
-import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.level.block.state.BlockState
-import net.minecraft.world.phys.AABB
 import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
-import kotlin.math.sqrt
 
 class BreakerAura : CgcModule(
 	id = "BreakerAura",
@@ -129,7 +127,7 @@ class BreakerAura : CgcModule(
 			val state = level.getBlockState(bp)
 			val shape = state.getShape(level, bp)
 			if (!shape.isEmpty) {
-				renderBox(context, shape.bounds().move(bp), colour.value)
+				CgcRenderer3D.outlineBox(shape.bounds().move(bp), colour.value, depth = true)
 			}
 		}
 	}
@@ -267,50 +265,6 @@ class BreakerAura : CgcModule(
 			Direction.EAST -> Vec3(1.0, 0.5, 0.5)
 		}
 		return pos.add(offset)
-	}
-
-	private fun renderBox(context: LevelRenderContext, aabb: AABB, color: Colour) {
-		val camera = Minecraft.getInstance().gameRenderer.mainCamera.position()
-		val matrices = context.poseStack()
-		val buffer = context.bufferSource().getBuffer(RenderTypes.lines())
-		matrices.pushPose()
-		matrices.translate(-camera.x, -camera.y, -camera.z)
-
-		for ((a, b) in boxEdges(aabb)) {
-			val normal = b.subtract(a).normalForLine()
-			buffer.addVertex(matrices.last(), a.x.toFloat(), a.y.toFloat(), a.z.toFloat())
-				.setColor(color.red, color.green, color.blue, color.alpha)
-				.setNormal(matrices.last(), normal.x.toFloat(), normal.y.toFloat(), normal.z.toFloat())
-			buffer.addVertex(matrices.last(), b.x.toFloat(), b.y.toFloat(), b.z.toFloat())
-				.setColor(color.red, color.green, color.blue, color.alpha)
-				.setNormal(matrices.last(), normal.x.toFloat(), normal.y.toFloat(), normal.z.toFloat())
-		}
-
-		matrices.popPose()
-	}
-
-	private fun boxEdges(aabb: AABB): List<Pair<Vec3, Vec3>> {
-		val p000 = Vec3(aabb.minX, aabb.minY, aabb.minZ)
-		val p001 = Vec3(aabb.minX, aabb.minY, aabb.maxZ)
-		val p010 = Vec3(aabb.minX, aabb.maxY, aabb.minZ)
-		val p011 = Vec3(aabb.minX, aabb.maxY, aabb.maxZ)
-		val p100 = Vec3(aabb.maxX, aabb.minY, aabb.minZ)
-		val p101 = Vec3(aabb.maxX, aabb.minY, aabb.maxZ)
-		val p110 = Vec3(aabb.maxX, aabb.maxY, aabb.minZ)
-		val p111 = Vec3(aabb.maxX, aabb.maxY, aabb.maxZ)
-		return listOf(
-			p000 to p001, p001 to p101, p101 to p100, p100 to p000,
-			p010 to p011, p011 to p111, p111 to p110, p110 to p010,
-			p000 to p010, p001 to p011, p100 to p110, p101 to p111
-		)
-	}
-
-	private fun Vec3.normalForLine(): Vec3 {
-		val length = sqrt(lengthSqr())
-		if (length < 1.0E-6) {
-			return Vec3(0.0, 1.0, 0.0)
-		}
-		return Vec3(x / length, y / length, z / length)
 	}
 
 	private companion object {

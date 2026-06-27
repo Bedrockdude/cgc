@@ -4,7 +4,6 @@ import cgc.cgc.dungeon.DungeonState
 import cgc.cgc.terminal.TerminalContext
 import cgc.cgc.module.impl.dungeon.AutoSSSpecsafe
 import cgc.cgc.module.impl.dungeon.AutoLeap
-import cgc.cgc.module.impl.dungeon.AutoP3
 import cgc.cgc.module.impl.dungeon.AutoTerms
 import cgc.cgc.module.impl.dungeon.BreakerAura
 import cgc.cgc.module.impl.dungeon.DungeonBreaker
@@ -48,7 +47,6 @@ object CgcModules {
 			LeapCounter(),
 			FastLeap(),
 			AutoLeap(),
-			AutoP3(),
 			AutoTerms(),
 			TerminalSolver(),
 			AutoSSSpecsafe(),

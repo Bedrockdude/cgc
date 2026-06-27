@@ -18,6 +18,7 @@ import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ColourSetting
 import cgc.cgc.module.setting.DragSetting
 import cgc.cgc.module.setting.SaveSetting
+import cgc.cgc.runtime.CgcRenderer3D
 import cgc.cgc.utils.ChatUtils
 import cgc.cgc.utils.DungeonUtils
 import com.google.gson.reflect.TypeToken
@@ -26,7 +27,6 @@ import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.player.LocalPlayer
-import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.phys.Vec3
 import org.joml.Vector2d
@@ -34,9 +34,6 @@ import java.util.Comparator
 import java.util.EnumSet
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.sqrt
 
 class LeapCounter : CgcModule(
 	id = "LeapCounter",
@@ -125,7 +122,7 @@ class LeapCounter : CgcModule(
 		synchronized(nodes) {
 			for (node in nodes) {
 				if (node.phase == phase) {
-					renderCircle(context, Vec3(node.x, node.y + 0.02, node.z), node.radius, nodeColour.value)
+					CgcRenderer3D.circle(Vec3(node.x, node.y + 0.02, node.z), false, node.radius.toFloat(), nodeColour.value, CIRCLE_SEGMENTS)
 				}
 			}
 		}
@@ -266,42 +263,6 @@ class LeapCounter : CgcModule(
 		activeTicks = 0
 		counted.clear()
 		snapshots.clear()
-	}
-
-	private fun renderCircle(context: LevelRenderContext, center: Vec3, radius: Double, colour: Colour) {
-		val camera = Minecraft.getInstance().gameRenderer.mainCamera.position()
-		val matrices = context.poseStack()
-		val buffer = context.bufferSource().getBuffer(RenderTypes.lines())
-		matrices.pushPose()
-		matrices.translate(-camera.x, -camera.y, -camera.z)
-
-		var previous = circlePoint(center, radius, 0)
-		for (i in 1..CIRCLE_SEGMENTS) {
-			val next = circlePoint(center, radius, i)
-			val normal = next.subtract(previous).normalForLine()
-			buffer.addVertex(matrices.last(), previous.x.toFloat(), previous.y.toFloat(), previous.z.toFloat())
-				.setColor(colour.red, colour.green, colour.blue, colour.alpha)
-				.setNormal(matrices.last(), normal.x.toFloat(), normal.y.toFloat(), normal.z.toFloat())
-			buffer.addVertex(matrices.last(), next.x.toFloat(), next.y.toFloat(), next.z.toFloat())
-				.setColor(colour.red, colour.green, colour.blue, colour.alpha)
-				.setNormal(matrices.last(), normal.x.toFloat(), normal.y.toFloat(), normal.z.toFloat())
-			previous = next
-		}
-
-		matrices.popPose()
-	}
-
-	private fun circlePoint(center: Vec3, radius: Double, index: Int): Vec3 {
-		val angle = index.toDouble() / CIRCLE_SEGMENTS.toDouble() * Math.PI * 2.0
-		return Vec3(center.x + cos(angle) * radius, center.y, center.z + sin(angle) * radius)
-	}
-
-	private fun Vec3.normalForLine(): Vec3 {
-		val length = sqrt(lengthSqr())
-		if (length < 1.0E-6) {
-			return Vec3(0.0, 1.0, 0.0)
-		}
-		return Vec3(x / length, y / length, z / length)
 	}
 
 	private fun modMessage(message: String, vararg args: Any?) {
