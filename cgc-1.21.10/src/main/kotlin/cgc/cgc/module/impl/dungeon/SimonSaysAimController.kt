@@ -38,9 +38,21 @@ data class AimSettings(
 	val microCorrection: Double
 )
 
+data class AimMoveContext(
+	val rowDelta: Int,
+	val columnDelta: Int,
+	val chebyshevDistance: Int,
+	val euclideanDistance: Double,
+	val diagonal: Boolean,
+	val continuingDirection: Boolean,
+	val reversingDirection: Boolean,
+	val passesThroughTarget: Boolean
+)
+
 data class AimPlan(
 	val mode: AimMode,
 	val velocityProfile: AimVelocityProfile,
+	val moveContext: AimMoveContext?,
 	val start: Rotation,
 	val final: Rotation,
 	val angularDistance: Double,
@@ -91,6 +103,7 @@ class SimonSaysAimController {
 		target: Vec3,
 		settings: AimSettings,
 		mode: AimMode,
+		moveContext: AimMoveContext? = null,
 		nowMs: Long = System.currentTimeMillis()
 	) {
 		val start = Rotation(player.yRot, player.xRot.coerceIn(MIN_PITCH, MAX_PITCH))
@@ -104,25 +117,31 @@ class SimonSaysAimController {
 		val planSettings = settings.coerced()
 		val practiceReturnMode = mode == AimMode.PRACTICE_RETURN
 		val practiceMode = mode == AimMode.PRACTICE || mode == AimMode.PRACTICE_RETURN
+		val preAimMode = mode == AimMode.PRE_AIM
 		val waitCorrectionMode = mode == AimMode.WAIT_CORRECTION
-		val band = AimDistanceBand.fromDistance(angularDistance)
+		val band = AimDistanceBand.fromDistance(angularDistance, moveContext)
 		val velocityProfile = band.velocityProfile()
-		val durationMs = planDurationMs(angularDistance, band, mode, planSettings, random)
+		val durationMs = planDurationMs(angularDistance, band, mode, planSettings, random, moveContext)
 		val eyeDistance = max(MIN_TARGET_EYE_DISTANCE, player.eyePosition.distanceTo(target))
-		val overshootAmount = if (practiceMode || waitCorrectionMode) 0.0 else overshootAmount(angularDistance, eyeDistance, band, planSettings, random)
+		val overshootAmount = if (practiceMode || waitCorrectionMode || preAimMode) {
+			0.0
+		} else {
+			overshootAmount(angularDistance, eyeDistance, band, planSettings, random, moveContext)
+		}
 		val motionDirection = directionOrZero(yawDelta.toDouble(), pitchDelta.toDouble(), angularDistance)
 		val perpendicular = perpendicular(motionDirection, random.sign())
 		val overshootDirection = overshootDirection(motionDirection, perpendicular, overshootAmount, band, random)
 		val curveAmount = when {
 			waitCorrectionMode -> 0.0
+			preAimMode -> 0.0
 			mode == AimMode.PRACTICE -> practiceCurveAmount(angularDistance, band, planSettings, random)
 			practiceReturnMode -> returnCurveAmount(angularDistance, band, planSettings, random)
-			else -> curveAmount(angularDistance, band, planSettings, random)
+			else -> curveAmount(angularDistance, band, planSettings, random, moveContext)
 		}
 		val curveDirection = if (curveAmount <= 0.0) Rotation(0.0f, 0.0f) else perpendicular
-		val settleDurationMs = if (practiceMode) 0L else settleDurationMs(band, planSettings, random)
-		val overshootHoldDurationMs = overshootHoldDurationMs(overshootAmount, band, random)
-		val correctionDurationMs = correctionDurationMs(durationMs, overshootAmount, band, random)
+		val settleDurationMs = if (practiceMode) 0L else settleDurationMs(band, planSettings, random, moveContext)
+		val overshootHoldDurationMs = overshootHoldDurationMs(overshootAmount, band, random, moveContext)
+		val correctionDurationMs = correctionDurationMs(durationMs, overshootAmount, band, random, moveContext)
 		val approachDurationMs = if (practiceMode) {
 			durationMs
 		} else {
@@ -136,10 +155,11 @@ class SimonSaysAimController {
 		val clickReadyAtMs = if (practiceMode) {
 			adjustedDurationMs
 		} else {
-			clickReadyAtMs(adjustedDurationMs, correctionDurationMs, settleDurationMs, overshootAmount)
+			clickReadyAtMs(adjustedDurationMs, correctionDurationMs, settleDurationMs, overshootAmount, moveContext)
 		}
 		val shake = when {
 			waitCorrectionMode -> waitCorrectionShakeAmplitudes(angularDistance, band, planSettings, random)
+			preAimMode -> waitCorrectionShakeAmplitudes(angularDistance, band, planSettings, random)
 			mode == AimMode.PRACTICE -> practiceShakeAmplitudes(angularDistance, band, planSettings, random)
 			practiceReturnMode -> returnShakeAmplitudes(angularDistance, band, planSettings, random)
 			else -> shakeAmplitudes(angularDistance, band, planSettings, random)
@@ -148,6 +168,7 @@ class SimonSaysAimController {
 		plan = AimPlan(
 			mode = mode,
 			velocityProfile = velocityProfile,
+			moveContext = moveContext,
 			start = start,
 			final = final,
 			angularDistance = angularDistance,
@@ -209,6 +230,13 @@ class SimonSaysAimController {
 			plan.start.yaw + overshootDelta.yaw,
 			(plan.start.pitch + overshootDelta.pitch).coerceIn(MIN_PITCH, MAX_PITCH)
 		)
+		val terminalCoast = holdCoastTerminalOffset(plan)
+		val correctionStartRotation = clampPitch(
+			Rotation(
+				overshootRotation.yaw + terminalCoast.yaw,
+				overshootRotation.pitch + terminalCoast.pitch
+			)
+		)
 
 		// Phase 1: travel toward the planned overshoot/side-pass point. The target
 		// of this phase is already beyond the button, so overshoot is part of the
@@ -229,7 +257,19 @@ class SimonSaysAimController {
 		// flicks read as momentum without freezing because shake is added later.
 		val correctionStartsAt = plan.approachDurationMs + plan.overshootHoldDurationMs
 		if (elapsedMs <= correctionStartsAt) {
-			return overshootRotation
+			if (plan.overshootHoldDurationMs <= 0L) {
+				return overshootRotation
+			}
+
+			val holdElapsed = elapsedMs - plan.approachDurationMs
+			val holdProgress = (holdElapsed.toDouble() / max(1L, plan.overshootHoldDurationMs)).coerceIn(0.0, 1.0)
+			val coast = holdCoastOffset(plan, holdProgress)
+			return clampPitch(
+				Rotation(
+					overshootRotation.yaw + coast.yaw,
+					overshootRotation.pitch + coast.pitch
+				)
+			)
 		}
 
 		// Phase 3: correction back to the clickable point. A small bounded curve is
@@ -246,8 +286,8 @@ class SimonSaysAimController {
 			val correctionCurve = correctionCurveOffset(plan, rawProgress)
 			return clampPitch(
 				Rotation(
-					lerp(overshootRotation.yaw, plan.final.yaw, progress) + correctionCurve.yaw,
-					lerp(overshootRotation.pitch, plan.final.pitch, progress) + correctionCurve.pitch
+					lerp(correctionStartRotation.yaw, plan.final.yaw, progress) + correctionCurve.yaw,
+					lerp(correctionStartRotation.pitch, plan.final.pitch, progress) + correctionCurve.pitch
 				)
 			)
 		}
@@ -274,11 +314,67 @@ class SimonSaysAimController {
 		if (plan.mode == AimMode.WAIT_CORRECTION) {
 			return lerp(progress, smootherStep(progress), 0.72).coerceIn(0.0, 1.0)
 		}
+		val moveContext = plan.moveContext
+		if (isOneBlockMove(moveContext)) {
+			return oneBlockVelocityCappedProgress(moveContext!!, progress)
+		}
 		if (plan.mode == AimMode.PRACTICE) {
 			return lerp(progress, smootherStep(progress), 0.32).coerceIn(0.0, 1.0)
 		}
 		if (plan.mode == AimMode.PRACTICE_RETURN) {
-			return lerp(progress, easeOutPower(progress, 1.18), 0.22).coerceIn(0.0, 1.0)
+			val controlled = lerp(progress, smootherStep(progress), 0.58)
+			val softCatch = easeOutPower(progress, 1.10)
+			return lerp(controlled, softCatch, 0.08).coerceIn(0.0, 1.0)
+		}
+		if (plan.mode == AimMode.PRE_AIM) {
+			val eased = smootherStep(progress)
+			val shaped = lerp(progress, eased, 0.90)
+			return lerp(shaped, easeOutPower(progress, 1.08), 0.04).coerceIn(0.0, 1.0)
+		}
+		if (moveContext != null) {
+			return when {
+				moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection -> {
+					val brake = lerp(progress, smootherStep(progress), 0.90)
+					lerp(brake, easeOutPower(progress, 1.08), 0.04)
+				}
+				moveContext.chebyshevDistance <= 1 && moveContext.continuingDirection -> {
+					val controlled = lerp(progress, smootherStep(progress), 0.62)
+					val softPass = easeOutPower(progress, 1.18 + plan.flickAggression * 0.05)
+					val shaped = lerp(controlled, softPass, 0.06)
+					limitInitialLead(shaped, progress, 1.18 + plan.flickAggression * 0.03)
+				}
+				moveContext.chebyshevDistance <= 1 -> {
+					val controlled = lerp(progress, smootherStep(progress), 0.64)
+					val direct = easeOutPower(progress, 1.16 + plan.flickAggression * 0.05)
+					lerp(controlled, direct, 0.06)
+				}
+				moveContext.chebyshevDistance == 2 -> {
+					if (moveContext.continuingDirection && moveContext.passesThroughTarget) {
+						val controlled = lerp(progress, smootherStep(progress), 0.42)
+						val flow = easeOutPower(progress, 1.22 + plan.flickAggression * 0.04)
+						val shaped = lerp(controlled, flow, 0.10)
+						limitInitialLead(shaped, progress, 1.28 + plan.flickAggression * 0.05)
+					} else if (moveContext.continuingDirection) {
+						val controlled = lerp(progress, smootherStep(progress), 0.50)
+						val flow = easeOutPower(progress, 1.28 + plan.flickAggression * 0.06)
+						val shaped = lerp(controlled, flow, 0.10)
+						limitInitialLead(shaped, progress, 1.34 + plan.flickAggression * 0.06)
+					} else {
+						val controlled = lerp(progress, smootherStep(progress), 0.56)
+						val quick = easeOutPower(progress, 1.42 + plan.flickAggression * 0.12)
+						lerp(controlled, quick, 0.12)
+					}
+				}
+				else -> {
+					val flick = easeOutPower(progress, 1.62 + plan.flickAggression * 0.26)
+					val controlled = lerp(progress, smootherStep(progress), 0.34)
+					val decel = easeOutPower(progress, 1.30 + plan.decelerationStrength * 0.28)
+					val base = lerp(controlled, decel, 0.32)
+					val flickBlend = delayedBlend(progress, 0.12, 0.78, 0.24 + plan.flickAggression * 0.08)
+					val shaped = lerp(base, flick, flickBlend)
+					limitInitialLead(shaped, progress, 1.84 + plan.flickAggression * 0.16)
+				}
+			}.coerceIn(0.0, 1.0)
 		}
 
 		return when (plan.velocityProfile) {
@@ -296,22 +392,38 @@ class SimonSaysAimController {
 				limitInitialLead(shaped, progress, 1.72 + plan.flickAggression * 0.18)
 			}
 			AimVelocityProfile.LARGE -> {
-				val controlled = lerp(progress, smootherStep(progress), 0.24)
-				val flick = easeOutPower(progress, 1.78 + plan.flickAggression * 0.45)
+				val controlled = lerp(progress, smootherStep(progress), 0.32)
+				val flick = easeOutPower(progress, 1.58 + plan.flickAggression * 0.32)
 				val decel = easeOutPower(progress, 1.34 + plan.decelerationStrength * 0.34)
-				val shaped = lerp(lerp(controlled, decel, 0.34), flick, 0.32 + plan.flickAggression * 0.12)
-				limitInitialLead(shaped, progress, 1.96 + plan.flickAggression * 0.26)
+				val base = lerp(controlled, decel, 0.38)
+				val flickBlend = delayedBlend(progress, 0.10, 0.76, 0.22 + plan.flickAggression * 0.10)
+				val shaped = lerp(base, flick, flickBlend)
+				limitInitialLead(shaped, progress, 1.78 + plan.flickAggression * 0.18)
 			}
 		}.coerceIn(0.0, 1.0)
 	}
 
 	private fun correctionProgress(plan: AimPlan, rawProgress: Double): Double {
 		val progress = rawProgress.coerceIn(0.0, 1.0)
+		val moveContext = plan.moveContext
+		if (moveContext != null) {
+			return when {
+				moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection -> smootherStep(progress)
+				moveContext.chebyshevDistance <= 1 && moveContext.continuingDirection -> easeOutPower(progress, 1.26)
+				moveContext.chebyshevDistance <= 1 -> lerp(smootherStep(progress), easeOutPower(progress, 1.42), 0.20)
+				moveContext.chebyshevDistance == 2 && moveContext.continuingDirection && moveContext.passesThroughTarget ->
+					momentumCorrectionProgress(plan, progress, 0.06, 1.10)
+				moveContext.chebyshevDistance == 2 && moveContext.continuingDirection ->
+					momentumCorrectionProgress(plan, progress, 0.08, 1.14)
+				moveContext.chebyshevDistance == 2 -> momentumCorrectionProgress(plan, progress, 0.12, 1.22)
+				else -> momentumCorrectionProgress(plan, progress, 0.18, 1.16)
+			}.coerceIn(0.0, 1.0)
+		}
 		return when (plan.velocityProfile) {
 			AimVelocityProfile.TINY,
 			AimVelocityProfile.SMALL -> smootherStep(progress)
 			AimVelocityProfile.MEDIUM -> lerp(smootherStep(progress), easeOutPower(progress, 1.55), 0.22)
-			AimVelocityProfile.LARGE -> lerp(smootherStep(progress), easeOutPower(progress, 1.38), 0.32)
+			AimVelocityProfile.LARGE -> momentumCorrectionProgress(plan, progress, 0.10, 1.12)
 		}.coerceIn(0.0, 1.0)
 	}
 
@@ -321,7 +433,7 @@ class SimonSaysAimController {
 		}
 
 		val envelope = asymmetricCurveEnvelope(plan, rawProgress)
-		val amount = plan.curveAmount * envelope
+		val amount = plan.curveAmount * CURVE_PEAK_SCALE * envelope
 		return Rotation(
 			(plan.curveDirection.yaw * amount).toFloat(),
 			(plan.curveDirection.pitch * amount).toFloat()
@@ -342,6 +454,55 @@ class SimonSaysAimController {
 		)
 	}
 
+	private fun holdCoastOffset(plan: AimPlan, rawProgress: Double): Rotation {
+		val progress = rawProgress.coerceIn(0.0, 1.0)
+		if (progress <= 0.0) {
+			return Rotation(0.0f, 0.0f)
+		}
+
+		val flickScale = (0.28 + plan.flickAggression * 0.72).coerceIn(0.0, 1.0)
+		val coastEnvelope = sin(progress * PI * 0.86).coerceAtLeast(0.0) * (1.0 - progress * 0.40)
+		val lateralEnvelope = sin(progress * PI * 0.94).coerceAtLeast(0.0) * (1.0 - progress * 0.28)
+		val carryAmount = plan.overshootAmount * HOLD_COAST_OVERSHOOT_SCALE * flickScale * coastEnvelope
+		val lateralAmount = plan.curveAmount * HOLD_COAST_CURVE_SCALE * flickScale * lateralEnvelope
+		val tailBlend = smootherStep(progress)
+		val terminal = holdCoastTerminalOffset(plan)
+		return Rotation(
+			(plan.overshootDirection.yaw * carryAmount).toFloat() +
+				(plan.curveDirection.yaw * lateralAmount).toFloat() +
+				(terminal.yaw * tailBlend.toFloat()),
+			(plan.overshootDirection.pitch * carryAmount).toFloat() +
+				(plan.curveDirection.pitch * lateralAmount).toFloat() +
+				(terminal.pitch * tailBlend.toFloat())
+		)
+	}
+
+	private fun holdCoastTerminalOffset(plan: AimPlan): Rotation {
+		if (plan.overshootAmount <= 0.0) {
+			return Rotation(0.0f, 0.0f)
+		}
+
+		val momentumScale = when {
+			plan.moveContext?.chebyshevDistance ?: 0 >= 3 -> 1.0
+			plan.moveContext?.chebyshevDistance == 2 -> 0.72
+			plan.velocityProfile == AimVelocityProfile.LARGE -> 0.92
+			plan.velocityProfile == AimVelocityProfile.MEDIUM -> 0.46
+			else -> 0.0
+		}
+		val aggressionScale = ((plan.flickAggression - 0.10) / 0.90).coerceIn(0.0, 1.0)
+		val tailScale = momentumScale * aggressionScale
+		if (tailScale <= 0.0) {
+			return Rotation(0.0f, 0.0f)
+		}
+
+		val overshootTail = plan.overshootAmount * HOLD_COAST_TERMINAL_OVERSHOOT_SCALE * tailScale
+		val lateralTail = plan.curveAmount * HOLD_COAST_TERMINAL_CURVE_SCALE * tailScale
+		return Rotation(
+			(plan.overshootDirection.yaw * overshootTail).toFloat() + (plan.curveDirection.yaw * lateralTail).toFloat(),
+			(plan.overshootDirection.pitch * overshootTail).toFloat() + (plan.curveDirection.pitch * lateralTail).toFloat()
+		)
+	}
+
 	private fun asymmetricCurveEnvelope(plan: AimPlan, rawProgress: Double): Double {
 		val progress = rawProgress.coerceIn(0.0, 1.0)
 		if (progress <= 0.0 || progress >= 1.0) {
@@ -352,13 +513,14 @@ class SimonSaysAimController {
 		val skew = plan.curveSkew
 		val base = if (progress <= peak) {
 			val local = (progress / peak).coerceIn(0.0, 1.0)
-			smootherStep(local.pow((1.0 + skew * 0.28).coerceIn(0.72, 1.28)))
+			smootherStep(local.pow((1.10 + skew * 0.20).coerceIn(0.92, 1.34)))
 		} else {
 			val local = ((1.0 - progress) / (1.0 - peak)).coerceIn(0.0, 1.0)
-			smootherStep(local.pow((1.0 - skew * 0.28).coerceIn(0.72, 1.28)))
+			smootherStep(local.pow((1.02 - skew * 0.16).coerceIn(0.86, 1.18)))
 		}
+		val entryDamping = lerp(CURVE_ENTRY_FLOOR, 1.0, smootherStep(progress))
 		val unevenness = 1.0 + plan.curveBias * 0.13 * sin(PI * progress * 2.0 + plan.shakePhaseA)
-		return (base * unevenness).coerceIn(0.0, 1.18)
+		return (base * entryDamping * unevenness).coerceIn(0.0, 1.12)
 	}
 
 	private fun shakeAt(plan: AimPlan, elapsedMs: Long): Rotation {
@@ -492,8 +654,13 @@ class SimonSaysAimController {
 		band: AimDistanceBand,
 		mode: AimMode,
 		settings: AimSettings,
-		random: Random
+		random: Random,
+		moveContext: AimMoveContext?
 	): Long {
+		if (isOneBlockPassThrough(moveContext)) {
+			return oneBlockPassThroughDurationMs(mode, moveContext!!, random)
+		}
+
 		val base = when (band) {
 			AimDistanceBand.TINY -> lerp(34.0, 58.0, (distance / TINY_DISTANCE).coerceIn(0.0, 1.0))
 			AimDistanceBand.SMALL -> lerp(76.0, 132.0, ((distance - TINY_DISTANCE) / (SMALL_DISTANCE - TINY_DISTANCE)).coerceIn(0.0, 1.0))
@@ -504,14 +671,15 @@ class SimonSaysAimController {
 			AimMode.START_BUTTON -> 0.86
 			AimMode.NORMAL_BUTTON -> 1.0
 			AimMode.CHAINED_RETARGET -> 0.9
-			AimMode.PRE_AIM -> 1.03
+			AimMode.PRE_AIM -> 1.18
 			AimMode.WAIT_CORRECTION -> 2.35
 			AimMode.PRACTICE -> practiceDurationScale(band)
-			AimMode.PRACTICE_RETURN -> 0.74
+			AimMode.PRACTICE_RETURN -> 0.94
 		}
+		val contextScale = contextualDurationScale(moveContext)
 		val randomScale = 1.0 + random.between(-0.10, 0.12) * settings.randomness
-		return (base * modeScale * randomScale / settings.speed)
-			.toLong()
+		val scaledDurationMs = (base * modeScale * contextScale * randomScale / settings.speed).toLong()
+		return max(scaledDurationMs, contextualMinDurationMs(moveContext, mode))
 			.coerceIn(MIN_DURATION_MS, MAX_DURATION_MS)
 	}
 
@@ -524,6 +692,28 @@ class SimonSaysAimController {
 		}
 
 	private fun overshootAmount(
+		distance: Double,
+		eyeDistance: Double,
+		band: AimDistanceBand,
+		settings: AimSettings,
+		random: Random,
+		moveContext: AimMoveContext?
+	): Double {
+		if (settings.overshootStrength <= 0.0) {
+			return 0.0
+		}
+		if (moveContext != null) {
+			val contextAmount = contextualOvershootAmount(eyeDistance, settings, random, moveContext)
+			return when {
+				moveContext.chebyshevDistance <= 1 -> contextAmount
+				moveContext.chebyshevDistance == 2 -> max(contextAmount, defaultOvershootAmount(distance, eyeDistance, band, settings, random) * 0.82)
+				else -> max(contextAmount, defaultOvershootAmount(distance, eyeDistance, band, settings, random))
+			}
+		}
+		return defaultOvershootAmount(distance, eyeDistance, band, settings, random)
+	}
+
+	private fun defaultOvershootAmount(
 		distance: Double,
 		eyeDistance: Double,
 		band: AimDistanceBand,
@@ -580,8 +770,24 @@ class SimonSaysAimController {
 		distance: Double,
 		band: AimDistanceBand,
 		settings: AimSettings,
-		random: Random
+		random: Random,
+		moveContext: AimMoveContext?
 	): Double {
+		if (moveContext != null) {
+			val maxFraction = when {
+				moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection -> 0.014
+				moveContext.chebyshevDistance <= 1 -> 0.026
+				moveContext.chebyshevDistance == 2 -> 0.052
+				else -> 0.072
+			}
+			val base = when {
+				moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection -> random.between(0.0, 0.010)
+				moveContext.chebyshevDistance <= 1 -> random.between(0.004, 0.024)
+				moveContext.chebyshevDistance == 2 -> random.between(0.026, 0.072)
+				else -> random.between(0.082, 0.18)
+			}
+			return (base * (0.62 + settings.randomness * 0.38)).coerceAtMost(distance * maxFraction)
+		}
 		if (band == AimDistanceBand.TINY) {
 			return 0.0
 		}
@@ -607,8 +813,8 @@ class SimonSaysAimController {
 			return 0.0
 		}
 
-		val base = curveAmount(distance, band, settings, random)
-		return (base * random.between(0.42, 0.68))
+		val base = curveAmount(distance, band, settings, random, null)
+		return (base * random.between(0.24, 0.44))
 			.coerceAtMost(distance * MAX_RETURN_CURVE_DISTANCE_FRACTION)
 	}
 
@@ -724,8 +930,8 @@ class SimonSaysAimController {
 		}
 		val travelYaw = (base * randomnessScale * random.between(0.82, 1.22))
 			.coerceAtMost(MAX_RETURN_TRAVEL_SHAKE_DEGREES)
-		val travelPitch = (travelYaw * random.between(0.46, 0.72))
-			.coerceAtMost(MAX_RETURN_TRAVEL_SHAKE_DEGREES * 0.72)
+		val travelPitch = (travelYaw * random.between(0.38, 0.58))
+			.coerceAtMost(MAX_RETURN_TRAVEL_SHAKE_DEGREES * 0.58)
 		return ShakeAmplitudes(travelYaw, travelPitch, 0.0, 0.0)
 	}
 
@@ -758,9 +964,40 @@ class SimonSaysAimController {
 			AimDistanceBand.TINY -> 0.0
 			AimDistanceBand.SMALL -> 0.0
 			AimDistanceBand.MEDIUM -> random.between(6.0, 12.0)
-			AimDistanceBand.LARGE -> random.between(10.0, 18.0)
+			AimDistanceBand.LARGE -> random.between(14.0, 24.0)
 		}
-		return hold.toLong()
+		val aggressionBonus = when (band) {
+			AimDistanceBand.TINY,
+			AimDistanceBand.SMALL -> 0.0
+			AimDistanceBand.MEDIUM -> random.between(1.5, 4.0)
+			AimDistanceBand.LARGE -> random.between(8.0, 14.0)
+		}
+		return (hold + aggressionBonus * (overshootAmount / AGGRESSIVE_FLICK_OVERSHOOT_DEGREES).coerceIn(0.0, 1.0)).toLong()
+	}
+
+	private fun overshootHoldDurationMs(
+		overshootAmount: Double,
+		band: AimDistanceBand,
+		random: Random,
+		moveContext: AimMoveContext?
+	): Long {
+		if (moveContext != null) {
+			if (overshootAmount <= 0.0 || moveContext.chebyshevDistance <= 1) {
+				return 0L
+			}
+			if (moveContext.chebyshevDistance == 2) {
+				val hold = if (moveContext.continuingDirection && moveContext.passesThroughTarget) {
+					random.between(2.0, 5.0)
+				} else if (moveContext.continuingDirection) {
+					random.between(3.0, 6.0)
+				} else {
+					random.between(4.0, 8.0)
+				}
+				val aggressionBonus = random.between(1.0, 3.0) * (overshootAmount / AGGRESSIVE_FLICK_OVERSHOOT_DEGREES).coerceIn(0.0, 1.0)
+				return (hold + aggressionBonus).toLong()
+			}
+		}
+		return overshootHoldDurationMs(overshootAmount, band, random)
 	}
 
 	private fun correctionDurationMs(durationMs: Long, overshootAmount: Double, band: AimDistanceBand, random: Random): Long {
@@ -777,6 +1014,29 @@ class SimonSaysAimController {
 		return (durationMs * ratio).toLong().coerceAtLeast(MIN_CORRECTION_MS)
 	}
 
+	private fun correctionDurationMs(
+		durationMs: Long,
+		overshootAmount: Double,
+		band: AimDistanceBand,
+		random: Random,
+		moveContext: AimMoveContext?
+	): Long {
+		if (moveContext != null) {
+			return when {
+				overshootAmount <= 0.0 -> 0L
+				moveContext.chebyshevDistance <= 1 && moveContext.continuingDirection -> (durationMs * random.between(0.18, 0.24)).toLong().coerceAtLeast(14L)
+				moveContext.chebyshevDistance <= 1 -> (durationMs * random.between(0.22, 0.30)).toLong().coerceAtLeast(18L)
+				moveContext.chebyshevDistance == 2 && moveContext.continuingDirection && moveContext.passesThroughTarget ->
+					(durationMs * random.between(0.14, 0.20)).toLong().coerceAtLeast(16L)
+				moveContext.chebyshevDistance == 2 && moveContext.continuingDirection ->
+					(durationMs * random.between(0.18, 0.26)).toLong().coerceAtLeast(18L)
+				moveContext.chebyshevDistance == 2 -> (durationMs * random.between(0.24, 0.34)).toLong().coerceAtLeast(24L)
+				else -> correctionDurationMs(durationMs, overshootAmount, band, random)
+			}
+		}
+		return correctionDurationMs(durationMs, overshootAmount, band, random)
+	}
+
 	private fun settleDurationMs(band: AimDistanceBand, settings: AimSettings, random: Random): Long {
 		val base = when (band) {
 			AimDistanceBand.TINY -> random.between(8.0, 14.0)
@@ -787,12 +1047,45 @@ class SimonSaysAimController {
 		return (base * (0.84 + settings.microCorrection * 0.32)).toLong().coerceAtLeast(MIN_SETTLE_MS)
 	}
 
+	private fun settleDurationMs(
+		band: AimDistanceBand,
+		settings: AimSettings,
+		random: Random,
+		moveContext: AimMoveContext?
+	): Long {
+		if (isOneBlockPassThrough(moveContext)) {
+			return 0L
+		}
+		return settleDurationMs(band, settings, random)
+	}
+
 	private fun clickReadyAtMs(
 		durationMs: Long,
 		correctionDurationMs: Long,
 		settleDurationMs: Long,
-		overshootAmount: Double
+		overshootAmount: Double,
+		moveContext: AimMoveContext?
 	): Long {
+		if (moveContext != null) {
+			return when {
+				isOneBlockPassThrough(moveContext) ->
+					(durationMs * 0.88).toLong().coerceAtLeast(84L)
+				moveContext.chebyshevDistance <= 1 && moveContext.continuingDirection ->
+					max(0L, durationMs - max(28L, settleDurationMs))
+				moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection ->
+					max(0L, durationMs - max(20L, (settleDurationMs * 3L) / 5L))
+				moveContext.chebyshevDistance <= 1 ->
+					max(0L, durationMs - max(28L, settleDurationMs))
+				moveContext.chebyshevDistance == 2 && moveContext.continuingDirection && moveContext.passesThroughTarget ->
+					(durationMs * 0.84).toLong().coerceAtLeast(72L)
+				moveContext.chebyshevDistance == 2 && moveContext.continuingDirection ->
+					max(0L, durationMs - max(18L, (settleDurationMs * 3L) / 5L))
+				moveContext.chebyshevDistance == 2 ->
+					max(0L, durationMs - min(12L, max(8L, settleDurationMs / 4L)))
+				else ->
+					max(0L, durationMs - min(12L, max(8L, settleDurationMs / 3L)))
+			}
+		}
 		if (overshootAmount <= 0.0 && correctionDurationMs <= 0L) {
 			return max(0L, durationMs - min(10L, settleDurationMs / 2L))
 		}
@@ -801,7 +1094,11 @@ class SimonSaysAimController {
 	}
 
 	private fun clickReadyTolerance(plan: AimPlan): Double =
-		(0.12 + plan.angularDistance * 0.018).coerceIn(0.12, 0.42)
+		when {
+			plan.moveContext?.chebyshevDistance ?: 0 <= 1 && plan.moveContext?.continuingDirection == true ->
+				(0.16 + plan.angularDistance * 0.020).coerceIn(0.16, 0.50)
+			else -> (0.12 + plan.angularDistance * 0.018).coerceIn(0.12, 0.42)
+		}
 
 	private fun angularError(rotation: Rotation, target: Rotation): Double {
 		val yaw = wrapAngleTo180(rotation.yaw - target.yaw)
@@ -884,6 +1181,78 @@ class SimonSaysAimController {
 		return value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
 	}
 
+	private fun momentumCorrectionProgress(plan: AimPlan, rawProgress: Double, easeOutWeight: Double, catchUpPower: Double): Double {
+		val progress = rawProgress.coerceIn(0.0, 1.0)
+		val delayed = smootherStep(progress.pow((1.14 + plan.decelerationStrength * 0.18).coerceAtLeast(1.0)))
+		val catchUp = easeOutPower(progress, catchUpPower + plan.flickAggression * 0.08)
+		return lerp(delayed, catchUp, easeOutWeight.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
+	}
+
+	private fun oneBlockVelocityCappedProgress(moveContext: AimMoveContext, rawProgress: Double): Double {
+		val progress = rawProgress.coerceIn(0.0, 1.0)
+		if (progress <= 0.0 || progress >= 1.0) {
+			return progress
+		}
+
+		val maxRate = oneBlockMaxProgressRate(moveContext)
+		val rampDuration = (1.0 - 1.0 / maxRate).coerceIn(0.04, 0.45)
+		val coastStart = rampDuration
+		val coastEnd = 1.0 - rampDuration
+		return when {
+			progress < coastStart -> {
+				0.5 * maxRate * progress * progress / rampDuration
+			}
+			progress <= coastEnd -> {
+				0.5 * maxRate * rampDuration + maxRate * (progress - rampDuration)
+			}
+			else -> {
+				val remaining = 1.0 - progress
+				1.0 - 0.5 * maxRate * remaining * remaining / rampDuration
+			}
+		}.coerceIn(0.0, 1.0)
+	}
+
+	private fun delayedBlend(rawProgress: Double, start: Double, end: Double, maxBlend: Double): Double {
+		if (maxBlend <= 0.0) {
+			return 0.0
+		}
+
+		val span = (end - start).coerceAtLeast(0.0001)
+		val progress = ((rawProgress - start) / span).coerceIn(0.0, 1.0)
+		return smootherStep(progress) * maxBlend.coerceIn(0.0, 1.0)
+	}
+
+	private fun isOneBlockPassThrough(moveContext: AimMoveContext?): Boolean =
+		moveContext != null &&
+			moveContext.chebyshevDistance <= 1 &&
+			moveContext.passesThroughTarget
+
+	private fun isOneBlockMove(moveContext: AimMoveContext?): Boolean =
+		moveContext != null &&
+			moveContext.chebyshevDistance <= 1
+
+	private fun oneBlockMaxProgressRate(moveContext: AimMoveContext): Double =
+		when {
+			moveContext.reversingDirection -> ONE_BLOCK_REVERSE_MAX_PROGRESS_RATE
+			moveContext.passesThroughTarget && !moveContext.continuingDirection -> ONE_BLOCK_FIRST_PASS_MAX_PROGRESS_RATE
+			moveContext.passesThroughTarget -> ONE_BLOCK_PASS_MAX_PROGRESS_RATE
+			moveContext.continuingDirection -> ONE_BLOCK_CONTINUE_MAX_PROGRESS_RATE
+			else -> ONE_BLOCK_MAX_PROGRESS_RATE
+		}
+
+	private fun oneBlockPassThroughDurationMs(mode: AimMode, moveContext: AimMoveContext, random: Random): Long {
+		val range = when {
+			moveContext.reversingDirection -> ONE_BLOCK_REVERSE_PASS_DURATION_MIN_MS to ONE_BLOCK_REVERSE_PASS_DURATION_MAX_MS
+			!moveContext.continuingDirection -> ONE_BLOCK_FIRST_PASS_DURATION_MIN_MS to ONE_BLOCK_FIRST_PASS_DURATION_MAX_MS
+			mode == AimMode.CHAINED_RETARGET -> ONE_BLOCK_CHAIN_PASS_DURATION_MIN_MS to ONE_BLOCK_CHAIN_PASS_DURATION_MAX_MS
+			else -> ONE_BLOCK_PASS_DURATION_MIN_MS to ONE_BLOCK_PASS_DURATION_MAX_MS
+		}
+		val practicePadding = if (mode == AimMode.PRACTICE) ONE_BLOCK_PRACTICE_PASS_PADDING_MS else 0L
+		return (random.between(range.first.toDouble(), range.second.toDouble()) + practicePadding)
+			.toLong()
+			.coerceIn(MIN_DURATION_MS, MAX_DURATION_MS)
+	}
+
 	private operator fun Rotation.plus(other: Rotation): Rotation =
 		Rotation(yaw + other.yaw, pitch + other.pitch)
 
@@ -892,6 +1261,70 @@ class SimonSaysAimController {
 
 	private fun Random.sign(): Int =
 		if (nextBoolean()) 1 else -1
+
+	private fun contextualDurationScale(moveContext: AimMoveContext?): Double {
+		if (moveContext == null) {
+			return 1.0
+		}
+
+		return when {
+			moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection -> 1.54
+			isOneBlockPassThrough(moveContext) -> 1.0
+			moveContext.chebyshevDistance <= 1 && moveContext.continuingDirection -> 1.42
+			moveContext.chebyshevDistance <= 1 -> 1.48
+			moveContext.chebyshevDistance == 2 && moveContext.reversingDirection -> 1.20
+			moveContext.chebyshevDistance == 2 && moveContext.continuingDirection && moveContext.passesThroughTarget -> 1.10
+			moveContext.chebyshevDistance == 2 && moveContext.continuingDirection -> 1.08
+			moveContext.chebyshevDistance == 2 -> 1.04
+			moveContext.chebyshevDistance >= 3 -> lerp(0.94, 0.84, nearMaxGridFactor(moveContext))
+			else -> 1.0
+		}
+	}
+
+	private fun contextualMinDurationMs(moveContext: AimMoveContext?, mode: AimMode): Long {
+		if (moveContext == null) {
+			return MIN_DURATION_MS
+		}
+
+		return when {
+			isOneBlockPassThrough(moveContext) ->
+				if (mode == AimMode.CHAINED_RETARGET) MIN_CHAINED_ONE_BLOCK_PASS_DURATION_MS else MIN_ONE_BLOCK_PASS_DURATION_MS
+			moveContext.chebyshevDistance <= 1 && moveContext.continuingDirection ->
+				MIN_ONE_BLOCK_CONTINUE_DURATION_MS
+			moveContext.chebyshevDistance <= 1 ->
+				MIN_ONE_BLOCK_DURATION_MS
+			else -> MIN_DURATION_MS
+		}
+	}
+
+	private fun contextualOvershootAmount(
+		eyeDistance: Double,
+		settings: AimSettings,
+		random: Random,
+		moveContext: AimMoveContext
+	): Double {
+		val overshootBlocks = when {
+			moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection -> 0.0
+			isOneBlockPassThrough(moveContext) -> 0.0
+			moveContext.chebyshevDistance <= 1 && moveContext.continuingDirection -> random.between(0.10, 0.18)
+			moveContext.chebyshevDistance <= 1 -> random.between(0.04, 0.09)
+			moveContext.chebyshevDistance == 2 && moveContext.continuingDirection && moveContext.passesThroughTarget -> random.between(0.05, 0.10)
+			moveContext.chebyshevDistance == 2 && moveContext.continuingDirection -> random.between(0.07, 0.13)
+			moveContext.chebyshevDistance == 2 -> random.between(0.10, 0.18)
+			else -> lerp(0.24, 0.48, nearMaxGridFactor(moveContext)) * random.between(0.92, 1.10)
+		}
+		if (overshootBlocks <= 0.0) {
+			return 0.0
+		}
+
+		val blockOffset = (overshootBlocks * settings.overshootStrength).coerceIn(0.0, MAX_OVERSHOOT_BLOCKS)
+		val logicalDistance = max(1.0, moveContext.chebyshevDistance.toDouble() + moveContext.euclideanDistance * 0.22)
+		val amount = Math.toDegrees(kotlin.math.atan2(blockOffset, eyeDistance))
+		return amount.coerceIn(0.0, logicalDistance * MAX_CONTEXT_OVERSHOOT_DISTANCE_FRACTION)
+	}
+
+	private fun nearMaxGridFactor(moveContext: AimMoveContext): Double =
+		((moveContext.euclideanDistance - 3.0) / (MAX_GRID_EUCLIDEAN_DISTANCE - 3.0)).coerceIn(0.0, 1.0)
 
 	private data class ShakeAmplitudes(
 		val travelYaw: Double,
@@ -915,13 +1348,23 @@ class SimonSaysAimController {
 			}
 
 		companion object {
-			fun fromDistance(distance: Double): AimDistanceBand =
-				when {
+			fun fromDistance(distance: Double, moveContext: AimMoveContext?): AimDistanceBand {
+				if (moveContext != null) {
+					return when {
+						moveContext.chebyshevDistance <= 1 && moveContext.reversingDirection -> SMALL
+						moveContext.chebyshevDistance <= 1 -> TINY
+						moveContext.chebyshevDistance == 2 -> MEDIUM
+						else -> LARGE
+					}
+				}
+
+				return when {
 					distance < TINY_DISTANCE -> TINY
 					distance < SMALL_DISTANCE -> SMALL
 					distance < MEDIUM_DISTANCE -> MEDIUM
 					else -> LARGE
 				}
+			}
 		}
 	}
 
@@ -937,22 +1380,49 @@ class SimonSaysAimController {
 		private const val LARGE_DISTANCE_RANGE = 24.0
 		private const val OVERSHOOT_START_DISTANCE = 16.0
 		private const val OVERSHOOT_FULL_DISTANCE = 26.0
-		private const val MEDIUM_OVERSHOOT_BLOCKS_MIN = 0.07
-		private const val MEDIUM_OVERSHOOT_BLOCKS_MAX = 0.20
-		private const val LARGE_OVERSHOOT_BLOCKS_MIN = 0.24
+		private const val MEDIUM_OVERSHOOT_BLOCKS_MIN = 0.14
+		private const val MEDIUM_OVERSHOOT_BLOCKS_MAX = 0.34
+		private const val LARGE_OVERSHOOT_BLOCKS_MIN = 0.54
 		private const val MAX_OVERSHOOT_BLOCKS = 0.50
 		private const val MIN_TARGET_EYE_DISTANCE = 0.5
 		private const val MAX_OVERSHOOT_DISTANCE_FRACTION = 0.34
+		private const val MAX_CONTEXT_OVERSHOOT_DISTANCE_FRACTION = 0.42
 		private const val MAX_CURVE_DISTANCE_FRACTION = 0.08
 		private const val MAX_RETURN_CURVE_DISTANCE_FRACTION = 0.036
 		private const val MAX_PRACTICE_CURVE_DISTANCE_FRACTION = 0.268
+		private const val MAX_GRID_EUCLIDEAN_DISTANCE = 4.242640687119285
 		private const val MIN_DURATION_MS = 24L
+		private const val MIN_ONE_BLOCK_DURATION_MS = 118L
+		private const val MIN_ONE_BLOCK_PASS_DURATION_MS = 126L
+		private const val MIN_CHAINED_ONE_BLOCK_PASS_DURATION_MS = 138L
+		private const val MIN_ONE_BLOCK_CONTINUE_DURATION_MS = 104L
+		private const val ONE_BLOCK_PASS_DURATION_MIN_MS = 160L
+		private const val ONE_BLOCK_PASS_DURATION_MAX_MS = 190L
+		private const val ONE_BLOCK_FIRST_PASS_DURATION_MIN_MS = 170L
+		private const val ONE_BLOCK_FIRST_PASS_DURATION_MAX_MS = 205L
+		private const val ONE_BLOCK_CHAIN_PASS_DURATION_MIN_MS = 158L
+		private const val ONE_BLOCK_CHAIN_PASS_DURATION_MAX_MS = 188L
+		private const val ONE_BLOCK_REVERSE_PASS_DURATION_MIN_MS = 184L
+		private const val ONE_BLOCK_REVERSE_PASS_DURATION_MAX_MS = 220L
+		private const val ONE_BLOCK_PRACTICE_PASS_PADDING_MS = 8L
+		private const val ONE_BLOCK_MAX_PROGRESS_RATE = 1.20
+		private const val ONE_BLOCK_CONTINUE_MAX_PROGRESS_RATE = 1.16
+		private const val ONE_BLOCK_PASS_MAX_PROGRESS_RATE = 1.14
+		private const val ONE_BLOCK_FIRST_PASS_MAX_PROGRESS_RATE = 1.12
+		private const val ONE_BLOCK_REVERSE_MAX_PROGRESS_RATE = 1.10
 		private const val MAX_DURATION_MS = 360L
 		private const val MIN_APPROACH_MS = 22L
 		private const val MIN_CORRECTION_MS = 34L
 		private const val MIN_SETTLE_MS = 6L
 		private const val SETTLE_DRIFT_SCALE = 0.055f
 		private const val CORRECTION_CURVE_SCALE = 0.2
+		private const val HOLD_COAST_OVERSHOOT_SCALE = 0.18
+		private const val HOLD_COAST_CURVE_SCALE = 0.34
+		private const val HOLD_COAST_TERMINAL_OVERSHOOT_SCALE = 0.08
+		private const val HOLD_COAST_TERMINAL_CURVE_SCALE = 0.18
+		private const val CURVE_PEAK_SCALE = 0.92
+		private const val CURVE_ENTRY_FLOOR = 0.84
+		private const val AGGRESSIVE_FLICK_OVERSHOOT_DEGREES = 0.34
 		private const val MAX_TRAVEL_SHAKE_DEGREES = 0.2
 		private const val MAX_PRACTICE_TRAVEL_SHAKE_DEGREES = 0.62
 		private const val MAX_RETURN_TRAVEL_SHAKE_DEGREES = 0.12

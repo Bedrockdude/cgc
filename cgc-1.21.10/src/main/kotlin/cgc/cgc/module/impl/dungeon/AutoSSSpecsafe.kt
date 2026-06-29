@@ -42,6 +42,7 @@ import net.minecraft.world.phys.shapes.VoxelShape
 import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 class AutoSSSpecsafe : CgcModule(
 	id = "AutoSSSpecsafe",
@@ -58,6 +59,7 @@ class AutoSSSpecsafe : CgcModule(
 	private val aimSpeed = NumberSetting("Aim Speed", 0.5, 2.0, 1.0, 0.05, "x")
 	private val waitCorrectionAimSpeed = NumberSetting("Wait Correction Aim Speed", 0.1, 2.0, 0.6, 0.05, "x")
 	private val practiceAimSpeed = NumberSetting("Practice Aim Speed", 0.1, 2.0, 0.6, 0.05, "x")
+	private val practiceAimCycles = BooleanSetting("Practice Aim Cycles", true)
 	private val donePopup = BooleanSetting("Done Popup", false)
 	private val fillColor = ColourSetting("Button Fill Color", Colour(85, 255, 85))
 	private val outlineColor = ColourSetting("Button Outline Color", Colour(0, 170, 0))
@@ -96,8 +98,11 @@ class AutoSSSpecsafe : CgcModule(
 	private var practiceUnlocked = false
 	private var practicePassesCompleted = 0
 	private var practiceMaxPasses = 0
+	private var practiceReturnAt = 0L
 	private var practiceResumeAt = 0L
 	private var autoRestartAt = 0L
+	private var previousGridButton: BlockPos? = null
+	private var previousGridMotion: GridMotion? = null
 
 	init {
 		registerProperty(
@@ -109,6 +114,7 @@ class AutoSSSpecsafe : CgcModule(
 			aimSpeed,
 			waitCorrectionAimSpeed,
 			practiceAimSpeed,
+			practiceAimCycles,
 			donePopup,
 			fillColor,
 			outlineColor
@@ -340,6 +346,10 @@ class AutoSSSpecsafe : CgcModule(
 			clearTarget()
 			return
 		}
+		if (targetPractice && !practiceAimCycles.value) {
+			clearTarget()
+			return
+		}
 
 		if (!targetPreAim && !targetWaitingForButton && !targetPractice && !client.level!!.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
 			clearTarget()
@@ -434,7 +444,8 @@ class AutoSSSpecsafe : CgcModule(
 			flowingRetarget -> AimMode.CHAINED_RETARGET
 			else -> AimMode.NORMAL_BUTTON
 		}
-		aimController.start(player, aimPoint, getAimSettings(mode), mode)
+		aimController.start(player, aimPoint, getAimSettings(mode), mode, buildMoveContext(button, mode))
+		recordGridTarget(button, mode)
 	}
 
 	private fun clickTarget(client: Minecraft): Boolean {
@@ -513,7 +524,7 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun beginFirstButtonPreAim(client: Minecraft): Boolean {
-		if (practiceUnlocked) {
+		if (practiceAimCycles.value && practiceUnlocked) {
 			return false
 		}
 
@@ -582,9 +593,9 @@ class AutoSSSpecsafe : CgcModule(
 		targetWaitCorrectionOnRealButton = false
 		preAimButton = button
 		targetAimPoint = if (level.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
-			getAimPoint(level, button)
+			getAimPoint(level, button, PRE_AIM_TOLERANCE)
 		} else {
-			getPracticeAimPoint(button)
+			getPracticeAimPoint(button, PRE_AIM_AIM_OFFSET)
 		}
 		aimController.start(player, targetAimPoint!!, getAimSettings(AimMode.PRE_AIM), AimMode.PRE_AIM)
 		return true
@@ -700,7 +711,11 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun canPracticeCurrentSequence(): Boolean =
-		practiceUnlocked && completedSequenceCount >= PRACTICE_UNLOCK_SEQUENCE_COUNT && clicks.isNotEmpty() && clicks.size <= FINAL_SEQUENCE_LENGTH
+		practiceAimCycles.value &&
+			practiceUnlocked &&
+			completedSequenceCount >= PRACTICE_UNLOCK_SEQUENCE_COUNT &&
+			clicks.isNotEmpty() &&
+			clicks.size <= FINAL_SEQUENCE_LENGTH
 
 	private fun desiredPracticePasses(): Int =
 		1
@@ -765,9 +780,24 @@ class AutoSSSpecsafe : CgcModule(
 		} else {
 			practicePassesCompleted++
 			targetPracticeIndex = 0
-			targetPracticeReturningToStart = true
 			practiceResumeAt = 0L
-			return beginPracticeButton(client, practiceButtons.first(), flowingRetarget = true, returnToStart = true)
+			val firstButton = practiceButtons.first()
+			if (targetButton == firstButton) {
+				practiceReturnAt = 0L
+				targetPracticeReturningToStart = true
+				return true
+			}
+			if (practiceReturnAt <= 0L) {
+				practiceReturnAt = System.currentTimeMillis() + PRACTICE_RETURN_PAUSE_MS
+				return true
+			}
+			if (System.currentTimeMillis() < practiceReturnAt) {
+				return true
+			}
+
+			practiceReturnAt = 0L
+			targetPracticeReturningToStart = true
+			return beginPracticeButton(client, firstButton, flowingRetarget = true, returnToStart = true)
 		}
 	}
 
@@ -807,9 +837,14 @@ class AutoSSSpecsafe : CgcModule(
 		targetWaitingForButton = false
 		targetWaitCorrectionStarted = false
 		targetWaitCorrectionOnRealButton = false
-		targetAimPoint = getPracticeAimPoint(button)
+		targetAimPoint = if (returnToStart) {
+			getPracticeAimPoint(button, PRACTICE_RETURN_AIM_OFFSET)
+		} else {
+			getPracticeAimPoint(button)
+		}
 		val mode = if (returnToStart) AimMode.PRACTICE_RETURN else AimMode.PRACTICE
-		aimController.start(player, targetAimPoint!!, getAimSettings(mode), mode)
+		aimController.start(player, targetAimPoint!!, getAimSettings(mode), mode, buildMoveContext(button, mode))
+		recordGridTarget(button, mode)
 	}
 
 	private fun beginWaitCorrectionIfNeeded(client: Minecraft, button: BlockPos, aimResult: AimUpdateResult): Boolean {
@@ -835,6 +870,78 @@ class AutoSSSpecsafe : CgcModule(
 		targetWaitCorrectionOnRealButton = true
 		aimController.start(player, targetAimPoint!!, getAimSettings(AimMode.WAIT_CORRECTION), AimMode.WAIT_CORRECTION)
 		return true
+	}
+
+	private fun buildMoveContext(button: BlockPos, mode: AimMode): AimMoveContext? {
+		if (!tracksGridMotion(mode)) {
+			return null
+		}
+
+		val previous = previousGridButton ?: return null
+		val rowDelta = button.y - previous.y
+		val columnDelta = button.z - previous.z
+		if (rowDelta == 0 && columnDelta == 0) {
+			return null
+		}
+
+		val chebyshevDistance = max(kotlin.math.abs(rowDelta), kotlin.math.abs(columnDelta))
+		val euclideanDistance = sqrt((rowDelta * rowDelta + columnDelta * columnDelta).toDouble())
+		val diagonal = kotlin.math.abs(rowDelta) == kotlin.math.abs(columnDelta) && rowDelta != 0
+		val currentMotion = GridMotion(rowDelta, columnDelta)
+		val alignment = previousGridMotion?.alignmentWith(currentMotion)
+		val nextMotion = nextGridMotion(button, mode)
+		return AimMoveContext(
+			rowDelta = rowDelta,
+			columnDelta = columnDelta,
+			chebyshevDistance = chebyshevDistance,
+			euclideanDistance = euclideanDistance,
+			diagonal = diagonal,
+			continuingDirection = alignment != null && alignment >= 0.72,
+			reversingDirection = alignment != null && alignment <= -0.30,
+			passesThroughTarget = nextMotion != null && currentMotion.alignmentWith(nextMotion) >= 0.72
+		)
+	}
+
+	private fun recordGridTarget(button: BlockPos, mode: AimMode) {
+		if (!tracksGridMotion(mode)) {
+			return
+		}
+
+		val previous = previousGridButton
+		if (previous != null) {
+			val rowDelta = button.y - previous.y
+			val columnDelta = button.z - previous.z
+			if (rowDelta != 0 || columnDelta != 0) {
+				previousGridMotion = GridMotion(rowDelta, columnDelta)
+			}
+		}
+		previousGridButton = button
+	}
+
+	private fun tracksGridMotion(mode: AimMode): Boolean =
+		when (mode) {
+			AimMode.NORMAL_BUTTON,
+			AimMode.CHAINED_RETARGET,
+			AimMode.PRACTICE,
+			AimMode.PRACTICE_RETURN -> true
+			else -> false
+		}
+
+	private fun nextGridMotion(button: BlockPos, mode: AimMode): GridMotion? {
+		val nextButton = when (mode) {
+			AimMode.NORMAL_BUTTON,
+			AimMode.CHAINED_RETARGET -> clicks.getOrNull(state + 1)
+			AimMode.PRACTICE -> practiceButtons.getOrNull(targetPracticeIndex + 1)
+			AimMode.PRACTICE_RETURN -> null
+			else -> null
+		} ?: return null
+
+		val rowDelta = nextButton.y - button.y
+		val columnDelta = nextButton.z - button.z
+		if (rowDelta == 0 && columnDelta == 0) {
+			return null
+		}
+		return GridMotion(rowDelta, columnDelta)
 	}
 
 	private fun readyToSolveCurrentPattern(client: Minecraft): Boolean {
@@ -873,13 +980,15 @@ class AutoSSSpecsafe : CgcModule(
 		return if (hit.type != HitResult.Type.MISS && hit.blockPos == expected) hit else null
 	}
 
-	private fun getAimPoint(level: ClientLevel, pos: BlockPos): Vec3 {
+	private fun getAimPoint(level: ClientLevel, pos: BlockPos): Vec3 =
+		getAimPoint(level, pos, AIM_TOLERANCE)
+
+	private fun getAimPoint(level: ClientLevel, pos: BlockPos, tolerance: Double): Vec3 {
 		val state = level.getBlockState(pos)
 		val shape = state.getShape(level, pos)
 		val box = if (shape.isEmpty) AABB(pos) else shape.bounds().move(pos)
 		val random = ThreadLocalRandom.current()
 		val center = box.center
-		val tolerance = AIM_TOLERANCE
 		val xDepth = box.xsize <= box.ysize && box.xsize <= box.zsize
 		val yDepth = box.ysize < box.xsize && box.ysize <= box.zsize
 		val x = center.x + if (xDepth) 0.0 else middleOffset(random, min(tolerance, max(0.0, box.xsize * 0.35)))
@@ -888,12 +997,15 @@ class AutoSSSpecsafe : CgcModule(
 		return Vec3(x, y, z)
 	}
 
-	private fun getPracticeAimPoint(pos: BlockPos): Vec3 {
+	private fun getPracticeAimPoint(pos: BlockPos): Vec3 =
+		getPracticeAimPoint(pos, PRACTICE_AIM_OFFSET)
+
+	private fun getPracticeAimPoint(pos: BlockPos, maxOffset: Double): Vec3 {
 		val random = ThreadLocalRandom.current()
 		return Vec3(
-			pos.x + PRACTICE_BUTTON_FACE_X + middleOffset(random, PRACTICE_AIM_OFFSET),
-			pos.y + 0.5 + middleOffset(random, PRACTICE_AIM_OFFSET),
-			pos.z + 0.5 + middleOffset(random, PRACTICE_AIM_OFFSET)
+			pos.x + PRACTICE_BUTTON_FACE_X + middleOffset(random, maxOffset),
+			pos.y + 0.5 + middleOffset(random, maxOffset),
+			pos.z + 0.5 + middleOffset(random, maxOffset)
 		)
 	}
 
@@ -1022,7 +1134,10 @@ class AutoSSSpecsafe : CgcModule(
 		practiceUnlocked = false
 		practicePassesCompleted = 0
 		practiceMaxPasses = 0
+		practiceReturnAt = 0L
 		practiceResumeAt = 0L
+		previousGridButton = null
+		previousGridMotion = null
 		clearAutoRestart()
 		clearOpeningPreAim()
 		donePopupUntil = 0L
@@ -1049,6 +1164,7 @@ class AutoSSSpecsafe : CgcModule(
 		targetWaitCorrectionStarted = false
 		targetWaitCorrectionOnRealButton = false
 		preAimButton = null
+		practiceReturnAt = 0L
 		clearOpeningPreAim()
 		aimController.clear()
 	}
@@ -1068,9 +1184,14 @@ class AutoSSSpecsafe : CgcModule(
 			AimMode.WAIT_CORRECTION -> getDouble(waitCorrectionAimSpeed)
 			else -> 1.0
 		}
+		val randomness = when (mode) {
+			AimMode.PRE_AIM -> PRE_AIM_RANDOMNESS
+			AimMode.PRACTICE_RETURN -> PRACTICE_RETURN_RANDOMNESS
+			else -> AIM_RANDOMNESS
+		}
 		return AimSettings(
 			speed = getDouble(aimSpeed) * speedMultiplier,
-			randomness = AIM_RANDOMNESS,
+			randomness = randomness,
 			overshootStrength = OVERSHOOT_STRENGTH,
 			microCorrection = MICRO_CORRECTION
 		)
@@ -1115,15 +1236,21 @@ class AutoSSSpecsafe : CgcModule(
 		private const val PRACTICE_UNLOCK_SEQUENCE_COUNT = 2
 		private const val PRACTICE_BUTTON_FACE_X = 0.875
 		private const val PRACTICE_AIM_OFFSET = 0.44
+		private const val PRE_AIM_AIM_OFFSET = 0.16
+		private const val PRACTICE_RETURN_AIM_OFFSET = 0.18
 		private const val MEDIUM_PRACTICE_TURN_DISTANCE = 32.0
 		private const val FIRST_PATTERN_PRE_AIM_REACTION_MS = 180L
+		private const val PRACTICE_RETURN_PAUSE_MS = 100L
 		private const val MIN_PRACTICE_RESUME_DELAY_MS = 500L
 		private const val MAX_PRACTICE_RESUME_DELAY_MS = 580L
 		private const val MIN_AUTO_RESTART_REACTION_MS = 180L
 		private const val MAX_AUTO_RESTART_REACTION_MS = 200L
 		private const val DONE_POPUP_MS = 1500L
 		private const val AIM_RANDOMNESS = 0.1
+		private const val PRE_AIM_RANDOMNESS = 0.03
+		private const val PRACTICE_RETURN_RANDOMNESS = 0.045
 		private const val AIM_TOLERANCE = 0.18
+		private const val PRE_AIM_TOLERANCE = 0.07
 		private const val OVERSHOOT_STRENGTH = 1.2
 		private const val MICRO_CORRECTION = 0.45
 		private const val CLICK_DELAY_MIN_MS = 8L
@@ -1139,5 +1266,20 @@ class AutoSSSpecsafe : CgcModule(
 
 		private fun randomStartClickDelayMs(): Long =
 			ThreadLocalRandom.current().nextLong(MIN_START_CLICK_DELAY_MS, MAX_START_CLICK_DELAY_MS + 1L)
+	}
+
+	private data class GridMotion(
+		val row: Int,
+		val column: Int
+	) {
+		fun alignmentWith(other: GridMotion): Double {
+			val length = sqrt((row * row + column * column).toDouble())
+			val otherLength = sqrt((other.row * other.row + other.column * other.column).toDouble())
+			if (length <= 0.0 || otherLength <= 0.0) {
+				return 0.0
+			}
+
+			return ((row * other.row) + (column * other.column)) / (length * otherLength)
+		}
 	}
 }

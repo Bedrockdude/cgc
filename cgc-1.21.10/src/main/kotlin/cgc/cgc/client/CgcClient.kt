@@ -1,6 +1,7 @@
 package cgc.cgc.client
 
 import cgc.cgc.client.gui.CgcConfigScreen
+import cgc.cgc.client.gui.CgcUiScreen
 import cgc.cgc.config.CgcConfigStore
 import cgc.cgc.module.CgcModules
 import cgc.cgc.runtime.CgcRenderer3D
@@ -12,10 +13,12 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
+import net.minecraft.client.gui.screens.Screen
 import net.minecraft.resources.Identifier
 
 object CgcClient : ClientModInitializer {
-	private var openConfigDelayTicks = -1
+	private var pendingScreenDelayTicks = -1
+	private var pendingScreen: (() -> Screen)? = null
 
 	override fun onInitializeClient() {
 		CgcModules.bootstrap()
@@ -25,16 +28,15 @@ object CgcClient : ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register { client ->
 			CgcModules.clientTick(client)
 
-			if (openConfigDelayTicks < 0) return@register
-			if (openConfigDelayTicks > 0) {
-				openConfigDelayTicks--
+			if (pendingScreenDelayTicks < 0) return@register
+			if (pendingScreenDelayTicks > 0) {
+				pendingScreenDelayTicks--
 				return@register
 			}
 
-			openConfigDelayTicks = -1
-			if (client.screen !is CgcConfigScreen) {
-				client.setScreen(CgcConfigScreen())
-			}
+			pendingScreenDelayTicks = -1
+			pendingScreen?.let { client.setScreen(it()) }
+			pendingScreen = null
 		}
 
 		ClientPlayConnectionEvents.JOIN.register { _, _, _ ->
@@ -59,9 +61,16 @@ object CgcClient : ClientModInitializer {
 		}
 
 		ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
-			CgcCommandRegistry.registerFabricCommands(dispatcher) {
-				openConfigDelayTicks = 2
-			}
+			CgcCommandRegistry.registerFabricCommands(
+				dispatcher,
+				openConfig = { openScreenLater { CgcConfigScreen() } },
+				openUi = { openScreenLater { CgcUiScreen() } }
+			)
 		}
+	}
+
+	private fun openScreenLater(factory: () -> Screen) {
+		pendingScreenDelayTicks = 2
+		pendingScreen = factory
 	}
 }

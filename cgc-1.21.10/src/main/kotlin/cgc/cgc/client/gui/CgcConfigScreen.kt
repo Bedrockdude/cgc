@@ -70,6 +70,7 @@ class CgcConfigScreen : Screen(Component.literal("CGC Config")) {
 		panel.keyPressed(input) || super.keyPressed(input)
 
 	override fun onClose() {
+		panel.saveSessionState()
 		CgcModules.manager.all().forEach { it.onGuiClosed() }
 		CgcConfigStore.saveAll()
 		super.onClose()
@@ -238,13 +239,53 @@ private class RsmStylePanel {
 		if (initialized) return
 		initialized = true
 
-		selectedCategory = ModuleCategory.entries.firstOrNull { CgcModules.manager.byCategory(it).isNotEmpty() } ?: ModuleCategory.MOVEMENT
+		val fallbackCategory = ModuleCategory.entries.firstOrNull { CgcModules.manager.byCategory(it).isNotEmpty() } ?: ModuleCategory.MOVEMENT
 		for (category in ModuleCategory.entries) {
 			val modules = CgcModules.manager.byCategory(category).sortedBy { it.displayName.lowercase(Locale.ROOT) }
 			modulesByCategory[category] = modules
-			modules.firstOrNull()?.let { selectedModules[category] = it }
 		}
-		expandedCategories.add(selectedCategory)
+		applySessionState(fallbackCategory)
+	}
+
+	fun saveSessionState() {
+		SessionState.selectedCategory = selectedCategory
+		SessionState.search = search
+		SessionState.leftScroll = leftScroll
+		SessionState.selectedModules = selectedModules.mapValues { it.value.id }.toMutableMap()
+		SessionState.selectedGroups = selectedGroups.mapValues { it.value.name }.toMutableMap()
+		SessionState.expandedCategories = expandedCategories.toMutableSet()
+		SessionState.settingsScroll = settingsScroll.toMutableMap()
+	}
+
+	private fun applySessionState(fallbackCategory: ModuleCategory) {
+		selectedCategory = SessionState.selectedCategory
+			?.takeIf { modulesByCategory[it].orEmpty().isNotEmpty() }
+			?: fallbackCategory
+		search = SessionState.search
+		leftScroll = SessionState.leftScroll
+		settingsScroll.putAll(SessionState.settingsScroll)
+
+		for ((category, modules) in modulesByCategory) {
+			val savedId = SessionState.selectedModules[category]
+			selectedModules[category] = modules.firstOrNull { it.id == savedId } ?: modules.firstOrNull() ?: continue
+		}
+
+		for ((moduleId, groupName) in SessionState.selectedGroups) {
+			val module = CgcModules.manager.get(moduleId) ?: continue
+			val group = module.getShownSettings().firstOrNull { it.name.equals(groupName, ignoreCase = true) } ?: continue
+			selectedGroups[moduleId] = group
+		}
+
+		expandedCategories.clear()
+		val savedExpanded = SessionState.expandedCategories
+			.filterTo(linkedSetOf()) { modulesByCategory[it].orEmpty().isNotEmpty() }
+		if (search.isNotBlank()) {
+			expandedCategories.addAll(modulesByCategory.keys.filter { modulesByCategory[it].orEmpty().isNotEmpty() })
+		} else if (savedExpanded.isNotEmpty()) {
+			expandedCategories.addAll(savedExpanded)
+		} else {
+			expandedCategories.add(selectedCategory)
+		}
 	}
 
 	private fun drawShell(gfx: GuiGraphicsExtractor, x: Int, y: Int, width: Int, height: Int, progress: Float) {
@@ -1023,6 +1064,16 @@ private class RsmStylePanel {
 		private const val SETTINGS_PER_COLUMN = 15
 		private const val COLUMN_STEP = 310
 		private const val CONTROL_X = 114
+	}
+
+	private object SessionState {
+		var selectedCategory: ModuleCategory? = null
+		var search: String = ""
+		var leftScroll: Double = 0.0
+		var selectedModules: MutableMap<ModuleCategory, String> = mutableMapOf()
+		var selectedGroups: MutableMap<String, String> = mutableMapOf()
+		var expandedCategories: MutableSet<ModuleCategory> = linkedSetOf()
+		var settingsScroll: MutableMap<String, Double> = mutableMapOf()
 	}
 }
 

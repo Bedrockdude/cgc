@@ -44,6 +44,8 @@ class LeapCounter : CgcModule(
 ), ClientTickModule, HudRenderModule, WorldRenderExtractModule, WorldLoadModule {
 	private val hud = DragSetting("Leap Counter", Vector2d(50.0, 80.0), Vector2d(HUD_WIDTH.toDouble(), HUD_HEIGHT.toDouble()))
 	private val forceSkyblock = BooleanSetting("Force Skyblock", false)
+	private val labelColour = ColourSetting("LC Text Colour", Colour(170, 210, 255, 255))
+	private val countColour = ColourSetting("Count Text Colour", Colour(255, 255, 255, 255))
 	private val renderNodes = BooleanSetting("Render Nodes", true)
 	private val nodeColour = ColourSetting("Node Colour", Colour(85, 170, 255, 180))
 	private val data = SaveSetting(
@@ -64,7 +66,7 @@ class LeapCounter : CgcModule(
 	private var tick = 0L
 
 	init {
-		registerProperty(hud, forceSkyblock, renderNodes, nodeColour, data)
+		registerProperty(hud, forceSkyblock, labelColour, countColour, renderNodes, nodeColour, data)
 		reload()
 	}
 
@@ -102,14 +104,13 @@ class LeapCounter : CgcModule(
 
 		val x = hud.position.x.toInt()
 		val y = hud.position.y.toInt()
-		gfx.fill(x, y, x + HUD_WIDTH, y + HUD_HEIGHT, 0x96000000.toInt())
-		gfx.centeredText(Minecraft.getInstance().font, "LC", x + HUD_WIDTH / 2, y + 5, 0xFFAAD2FF.toInt())
+		gfx.centeredText(Minecraft.getInstance().font, "LC", x + HUD_WIDTH / 2, y + 5, labelColour.value.argb())
 		gfx.centeredText(
 			Minecraft.getInstance().font,
 			"${counted.size}/${node.classes.size}",
 			x + HUD_WIDTH / 2,
 			y + 18,
-			0xFFFFFFFF.toInt()
+			countColour.value.argb()
 		)
 	}
 

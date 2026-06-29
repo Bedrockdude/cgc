@@ -1,6 +1,8 @@
 package cgc.cgc.client
 
 import cgc.cgc.config.CgcSettings
+import cgc.cgc.client.gui.CgcConfigScreen
+import cgc.cgc.client.gui.CgcUiScreen
 import cgc.cgc.module.CgcModules
 import cgc.cgc.module.impl.dungeon.LeapCounter
 import cgc.cgc.utils.ChatUtils
@@ -35,11 +37,22 @@ object CgcCommandRegistry {
 	fun getDispatcher(): CommandDispatcher<ClientSuggestionProvider> =
 		dispatcher
 
-	fun registerFabricCommands(dispatcher: CommandDispatcher<FabricClientCommandSource>, openConfig: () -> Unit) {
-		dispatcher.register(fabricLiteral("cgc").executes {
-			openConfig()
-			1
-		})
+	fun registerFabricCommands(
+		dispatcher: CommandDispatcher<FabricClientCommandSource>,
+		openConfig: () -> Unit,
+		openUi: () -> Unit
+	) {
+		dispatcher.register(
+			fabricLiteral("cgc")
+				.then(fabricLiteral("ui").executes {
+					openUi()
+					1
+				})
+				.executes {
+					openConfig()
+					1
+				}
+		)
 		registerFabricLeapCounter(dispatcher, "lc")
 		registerFabricLeapCounter(dispatcher, "leapcounter")
 	}
@@ -90,10 +103,17 @@ object CgcCommandRegistry {
 			usage()
 			1
 		})
-		dispatcher.register(literal("cgc").executes {
-			usage()
-			1
-		})
+		dispatcher.register(
+			literal("cgc")
+				.then(literal("ui").executes {
+					Minecraft.getInstance().setScreen(CgcUiScreen())
+					1
+				})
+				.executes {
+					Minecraft.getInstance().setScreen(CgcConfigScreen())
+					1
+				}
+		)
 		registerLeapCounter("lc")
 		registerLeapCounter("leapcounter")
 	}
