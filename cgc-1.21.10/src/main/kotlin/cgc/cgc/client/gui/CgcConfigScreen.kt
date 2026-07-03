@@ -8,6 +8,10 @@ import cgc.cgc.module.ModuleCategory
 import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ButtonSetting
 import cgc.cgc.module.setting.ColourSetting
+import cgc.cgc.module.setting.HotbarSwapListSetting
+import cgc.cgc.module.setting.HotbarSwapTrigger
+import cgc.cgc.module.setting.HotbarSwapType
+import cgc.cgc.module.setting.InventoryButtonListSetting
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.MultiBoolSetting
@@ -96,6 +100,7 @@ private class RsmStylePanel {
 	private val selectedModules = mutableMapOf<ModuleCategory, CgcModule>()
 	private val selectedGroups = mutableMapOf<String, GroupSetting<*>>()
 	private val settingsScroll = mutableMapOf<String, Double>()
+	private val hotbarTriggerScroll = mutableMapOf<String, Double>()
 	private val expandedCategories = linkedSetOf<ModuleCategory>()
 	private val modulesByCategory = mutableMapOf<ModuleCategory, List<CgcModule>>()
 
@@ -108,13 +113,18 @@ private class RsmStylePanel {
 	private var writingSearch = false
 	private var focusedString: StringSetting? = null
 	private var focusedSave: SaveSetting<*>? = null
+	private var focusedInventoryButtonField: InventoryButtonField? = null
 	private var waitingKeybind: KeybindSetting? = null
+	private var waitingHotbarSwapKey: WaitingHotbarSwapKey? = null
 	private var draggingNumber: NumberSetting? = null
 	private var draggingColour: ColourDrag? = null
 	private var expandedSettingKey: String? = null
 	private var initialized = false
 	private var leftBounds = Bounds.ZERO
 	private var settingsBounds = Bounds.ZERO
+	private var hotbarTriggerDropdownKey: String? = null
+	private var hotbarTriggerDropdownBounds = Bounds.ZERO
+	private var hotbarTriggerDropdownMaxScroll = 0.0
 	private var panelX = 0
 	private var panelY = 0
 	private var panelWidthPixels = WIDTH
@@ -123,6 +133,9 @@ private class RsmStylePanel {
 	fun render(gfx: GuiGraphicsExtractor, screenWidth: Int, screenHeight: Int, mouseX: Int, mouseY: Int, progress: Float) {
 		initializeState()
 		hitboxes.clear()
+		hotbarTriggerDropdownKey = null
+		hotbarTriggerDropdownBounds = Bounds.ZERO
+		hotbarTriggerDropdownMaxScroll = 0.0
 
 		panelWidthPixels = min(WIDTH, max(MIN_WIDTH, screenWidth - 24))
 		panelHeightPixels = min(HEIGHT, max(MIN_HEIGHT, screenHeight - 24))
@@ -144,7 +157,16 @@ private class RsmStylePanel {
 				return true
 			}
 		}
+		waitingHotbarSwapKey?.let { waiting ->
+			if (button != 0) {
+				waiting.swap.keybind.keyName = InputConstants.Type.MOUSE.getOrCreate(button).name
+				waiting.setting.onEdit()
+				waitingHotbarSwapKey = null
+				return true
+			}
+		}
 
+		focusedInventoryButtonField = null
 		for (hitbox in hitboxes.asReversed()) {
 			if (hitbox.contains(mouseX, mouseY)) {
 				hitbox.onClick(button)
@@ -155,6 +177,8 @@ private class RsmStylePanel {
 		writingSearch = false
 		focusedString = null
 		focusedSave = null
+		focusedInventoryButtonField = null
+		waitingHotbarSwapKey = null
 		if (button == 0) expandedSettingKey = null
 		return false
 	}
@@ -173,6 +197,13 @@ private class RsmStylePanel {
 
 	fun mouseScrolled(mouseX: Double, mouseY: Double, amount: Double): Boolean {
 		val delta = -amount * 23.0
+		val dropdownKey = hotbarTriggerDropdownKey
+		if (dropdownKey != null && hotbarTriggerDropdownBounds.contains(mouseX, mouseY)) {
+			val current = hotbarTriggerScroll.getOrDefault(dropdownKey, 0.0)
+			hotbarTriggerScroll[dropdownKey] = (current + delta).coerceIn(0.0, hotbarTriggerDropdownMaxScroll)
+			return true
+		}
+
 		return when {
 			leftBounds.contains(mouseX, mouseY) -> {
 				leftScroll = max(0.0, leftScroll + delta)
@@ -204,6 +235,15 @@ private class RsmStylePanel {
 			return true
 		}
 
+		focusedInventoryButtonField?.let { focused ->
+			if (!typedChar.isISOControl()) {
+				focused.button()?.let { button ->
+					focused.setting.setField(button, focused.field, focused.setting.fieldValue(button, focused.field) + typedChar)
+				}
+			}
+			return true
+		}
+
 		return false
 	}
 
@@ -219,6 +259,17 @@ private class RsmStylePanel {
 			waitingKeybind = null
 			return true
 		}
+		waitingHotbarSwapKey?.let { waiting ->
+			val key = InputConstants.getKey(input)
+			waiting.swap.keybind.keyName = if (key.value == 0 || key.value == InputConstants.KEY_ESCAPE) {
+				InputConstants.UNKNOWN.name
+			} else {
+				key.name
+			}
+			waiting.setting.onEdit()
+			waitingHotbarSwapKey = null
+			return true
+		}
 
 		if (writingSearch) {
 			return handleTextKey(input, search, allowBlank = true) { search = it }
@@ -230,6 +281,10 @@ private class RsmStylePanel {
 
 		focusedSave?.let { setting ->
 			return handleTextKey(input, setting.fileName, allowBlank = true) { setting.setFileName(it) }
+		}
+
+		focusedInventoryButtonField?.let { focused ->
+			return handleInventoryButtonTextKey(input, focused)
 		}
 
 		return false
@@ -319,6 +374,7 @@ private class RsmStylePanel {
 				focusedString = null
 				focusedSave = null
 				waitingKeybind = null
+				waitingHotbarSwapKey = null
 			}
 		})
 	}
@@ -556,6 +612,11 @@ private class RsmStylePanel {
 		val settings = group.value.getShownSettings()
 		val scrollKey = "${module.id}:${group.name}"
 		val rows = settings.filter { it !is cgc.cgc.module.setting.DragSetting }
+		if (rows.any { it is HotbarSwapListSetting || it is InventoryButtonListSetting }) {
+			renderVariableGroupSettings(gfx, module, group, rows, scrollKey, startX, startY, width, height, mouseX, mouseY)
+			return
+		}
+
 		val columns = max(1, (rows.size + SETTINGS_PER_COLUMN - 1) / SETTINGS_PER_COLUMN)
 		val totalHeight = min(SETTINGS_PER_COLUMN, rows.size) * SETTING_STEP
 		val maxScroll = max(0, totalHeight - height)
@@ -577,7 +638,7 @@ private class RsmStylePanel {
 			val rowY = startY + row * SETTING_STEP - scroll.roundToInt()
 			if (rowY + SETTING_STEP < startY - 12 || rowY > startY + height) continue
 
-			val rowInfo = SettingRow(module.id, group.name, setting, rowX, rowY)
+			val rowInfo = SettingRow(module.id, group.name, setting, rowX, rowY, COLUMN_STEP - 16)
 			if (isExpanded(setting, rowInfo.key)) {
 				expanded.add(rowInfo)
 			} else {
@@ -592,8 +653,59 @@ private class RsmStylePanel {
 		}
 	}
 
+	private fun renderVariableGroupSettings(
+		gfx: GuiGraphicsExtractor,
+		module: CgcModule,
+		group: GroupSetting<*>,
+		rows: List<Setting<*>>,
+		scrollKey: String,
+		startX: Int,
+		startY: Int,
+		width: Int,
+		height: Int,
+		mouseX: Int,
+		mouseY: Int
+	) {
+		if (rows.isEmpty()) {
+			gfx.text(font(), "No settings", startX, startY, Colours.UNSELECTED_TEXT, false)
+			return
+		}
+
+		val totalHeight = rows.sumOf { settingHeight(it) }
+		val maxScroll = max(0, totalHeight - height)
+		val scroll = settingsScroll.getOrDefault(scrollKey, 0.0).coerceIn(0.0, maxScroll.toDouble())
+		settingsScroll[scrollKey] = scroll
+
+		enableScissor(gfx, startX - 8, startY - 12, startX + width, startY + height)
+		val expanded = mutableListOf<SettingRow>()
+		var rowY = startY - scroll.roundToInt()
+		for (setting in rows) {
+			val rowHeight = settingHeight(setting)
+			if (rowY + rowHeight >= startY - 12 && rowY <= startY + height) {
+				val rowInfo = SettingRow(module.id, group.name, setting, startX, rowY, width)
+				if (isExpanded(setting, rowInfo.key)) {
+					expanded.add(rowInfo)
+				} else {
+					renderSetting(gfx, rowInfo, mouseX, mouseY)
+				}
+			}
+			rowY += rowHeight
+		}
+		expanded.forEach { renderSetting(gfx, it, mouseX, mouseY) }
+		gfx.disableScissor()
+	}
+
 	private fun renderSetting(gfx: GuiGraphicsExtractor, row: SettingRow, mouseX: Int, mouseY: Int) {
 		val setting = row.setting
+		if (setting is HotbarSwapListSetting) {
+			renderHotbarSwaps(gfx, row, setting, mouseX, mouseY)
+			return
+		}
+		if (setting is InventoryButtonListSetting) {
+			renderInventoryButtons(gfx, row, setting)
+			return
+		}
+
 		gfx.text(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
 
 		when (setting) {
@@ -719,6 +831,7 @@ private class RsmStylePanel {
 				focusedString = setting
 				focusedSave = null
 				waitingKeybind = null
+				waitingHotbarSwapKey = null
 				writingSearch = false
 			}
 		})
@@ -733,6 +846,7 @@ private class RsmStylePanel {
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) {
 				waitingKeybind = setting
+				waitingHotbarSwapKey = null
 				focusedString = null
 				focusedSave = null
 				writingSearch = false
@@ -748,6 +862,272 @@ private class RsmStylePanel {
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) setting.press()
 		})
+	}
+
+	private fun renderInventoryButtons(gfx: GuiGraphicsExtractor, row: SettingRow, setting: InventoryButtonListSetting) {
+		gfx.text(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
+		if (setting.value.isEmpty()) {
+			gfx.text(font(), "No buttons added", row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
+			return
+		}
+
+		var y = row.y + 18
+		val boxWidth = min(row.width, INVENTORY_BUTTON_BOX_WIDTH)
+		for ((index, button) in setting.value.withIndex()) {
+			val boxX = row.x
+			val boxY = y
+			fill(gfx, boxX, boxY, boxX + boxWidth, boxY + INVENTORY_BUTTON_BOX_HEIGHT, Colours.PANEL)
+			drawRectOutline(gfx, boxX, boxY, boxWidth, INVENTORY_BUTTON_BOX_HEIGHT, Colours.GROUP_OUTLINE)
+			gfx.text(font(), "Button ${index + 1}", boxX + 8, boxY + 7, Colours.TEXT, false)
+
+			val removeX = boxX + boxWidth - 25
+			drawInputBox(gfx, removeX, boxY + 5, 18, 19, false)
+			gfx.centeredText(font(), "X", removeX + 9, boxY + 11, Colours.TEXT)
+			hitboxes.add(Hitbox(removeX, boxY + 5, 18, 19) { mouseButton ->
+				if (mouseButton == 0) {
+					setting.removeButton(button)
+				}
+			})
+
+			renderInventoryButtonField(gfx, setting, button, InventoryButtonListSetting.Field.LABEL, "Label", boxX + 8, boxY + 33, 176)
+			renderInventoryButtonField(gfx, setting, button, InventoryButtonListSetting.Field.ICON, "Icon", boxX + 202, boxY + 33, boxWidth - 235)
+			renderInventoryButtonField(gfx, setting, button, InventoryButtonListSetting.Field.COMMAND, "Command", boxX + 8, boxY + 59, boxWidth - 16)
+
+			y += INVENTORY_BUTTON_BOX_HEIGHT + 6
+		}
+	}
+
+	private fun renderInventoryButtonField(
+		gfx: GuiGraphicsExtractor,
+		setting: InventoryButtonListSetting,
+		button: InventoryButtonListSetting.Button,
+		field: InventoryButtonListSetting.Field,
+		label: String,
+		x: Int,
+		y: Int,
+		width: Int
+	) {
+		val labelWidth = if (field == InventoryButtonListSetting.Field.COMMAND) 56 else 38
+		gfx.text(font(), label, x, y + 6, Colours.UNSELECTED_TEXT, false)
+		val inputX = x + labelWidth
+		val inputWidth = max(40, width - labelWidth)
+		val focused = focusedInventoryButtonField?.matches(setting, button, field) == true
+		drawInputBox(gfx, inputX, y, inputWidth, 19, focused)
+		val value = setting.fieldValue(button, field) + if (focused) "|" else ""
+		gfx.text(font(), fit(font(), value, inputWidth - 10), inputX + 5, y + 6, Colours.TEXT, false)
+		hitboxes.add(Hitbox(inputX, y, inputWidth, 19) { mouseButton ->
+			if (mouseButton == 0) {
+				focusedInventoryButtonField = InventoryButtonField(setting, button.id, field)
+				focusedString = null
+				focusedSave = null
+				waitingKeybind = null
+				waitingHotbarSwapKey = null
+				writingSearch = false
+			}
+		})
+	}
+
+	private fun renderHotbarSwaps(gfx: GuiGraphicsExtractor, row: SettingRow, setting: HotbarSwapListSetting, mouseX: Int, mouseY: Int) {
+		gfx.text(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
+		if (setting.value.isEmpty()) {
+			gfx.text(font(), "No swaps added", row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
+			return
+		}
+
+		var y = row.y + 18
+		val boxWidth = min(row.width, HOTBAR_SWAP_BOX_WIDTH)
+		var dropdown: HotbarSwapDropdown? = null
+		for ((index, swap) in setting.value.withIndex()) {
+			val boxX = row.x
+			val boxY = y
+			fill(gfx, boxX, boxY, boxX + boxWidth, boxY + HOTBAR_SWAP_BOX_HEIGHT, Colours.PANEL)
+			drawRectOutline(gfx, boxX, boxY, boxWidth, HOTBAR_SWAP_BOX_HEIGHT, Colours.GROUP_OUTLINE)
+			gfx.text(font(), "Swap ${index + 1}", boxX + 8, boxY + 7, Colours.TEXT, false)
+
+			val eventKey = "${row.key}:${swap.id}:event"
+			val eventExpanded = expandedSettingKey == eventKey
+			val eventX = boxX + 70
+			val eventY = boxY + 5
+			drawInputBox(gfx, eventX, eventY, 124, 19, eventExpanded)
+			gfx.text(font(), fit(font(), swap.trigger.displayName, 100), eventX + 5, eventY + 6, Colours.TEXT, false)
+			gfx.text(font(), if (eventExpanded) "v" else ">", eventX + 112, eventY + 6, Colours.TEXT, false)
+			hitboxes.add(Hitbox(eventX, eventY, 124, 19) { button ->
+				if (button == 0) {
+					expandedSettingKey = if (eventExpanded) null else eventKey
+					focusedString = null
+					focusedSave = null
+					waitingKeybind = null
+					waitingHotbarSwapKey = null
+					writingSearch = false
+				}
+			})
+			if (eventExpanded) {
+				dropdown = HotbarSwapDropdown(setting, swap, eventKey, eventX, eventY, eventY + 19, 124)
+			}
+
+			val setupX = eventX + 132
+			drawInputBox(gfx, setupX, eventY, 106, 19, false)
+			gfx.centeredText(font(), "Setup switch", setupX + 53, eventY + 6, Colours.TEXT)
+			hitboxes.add(Hitbox(setupX, eventY, 106, 19) { button ->
+				if (button == 0) {
+					expandedSettingKey = null
+					setting.openSetup(swap)
+				}
+			})
+
+			val typeX = setupX + 114
+			drawInputBox(gfx, typeX, eventY, 76, 19, swap.swapType != HotbarSwapType.SLOT)
+			gfx.centeredText(font(), fit(font(), swap.swapType.displayName, 66), typeX + 38, eventY + 6, Colours.TEXT)
+			hitboxes.add(Hitbox(typeX, eventY, 76, 19) { button ->
+				if (button == 0) {
+					swap.swapType = when (swap.swapType) {
+						HotbarSwapType.SLOT -> HotbarSwapType.ITEM
+						HotbarSwapType.ITEM -> HotbarSwapType.DEV_ONLY
+						HotbarSwapType.DEV_ONLY -> HotbarSwapType.SLOT
+					}
+					if (swap.swapType == HotbarSwapType.ITEM) {
+						fillMissingHotbarSwapItems(swap)
+					}
+					setting.onEdit()
+				}
+			})
+
+			val removeX = boxX + boxWidth - 25
+			drawInputBox(gfx, removeX, eventY, 18, 19, false)
+			gfx.centeredText(font(), "X", removeX + 9, eventY + 6, Colours.TEXT)
+			hitboxes.add(Hitbox(removeX, eventY, 18, 19) { button ->
+				if (button == 0) {
+					setting.removeSwap(swap)
+					if (expandedSettingKey?.startsWith("${row.key}:${swap.id}") == true) {
+						expandedSettingKey = null
+					}
+				}
+			})
+
+			val detailY = boxY + 33
+			if (swap.trigger == HotbarSwapTrigger.KEYBIND) {
+				val waiting = waitingHotbarSwapKey?.swap?.id == swap.id
+				drawInputBox(gfx, boxX + 8, detailY - 3, 136, 18, waiting)
+				val keyText = if (waiting) "..." else "Key: ${HotbarSwapListSetting.friendlyKeyName(swap.keybind.keyName)}"
+				gfx.text(font(), fit(font(), keyText, 124), boxX + 13, detailY + 3, Colours.TEXT, false)
+				hitboxes.add(Hitbox(boxX + 8, detailY - 3, 136, 18) { button ->
+					if (button == 0) {
+						waitingHotbarSwapKey = WaitingHotbarSwapKey(setting, swap)
+						waitingKeybind = null
+						focusedString = null
+						focusedSave = null
+						writingSearch = false
+					}
+				})
+				gfx.text(font(), "${swap.pairs.size} pair(s)", boxX + 154, detailY + 3, Colours.UNSELECTED_TEXT, false)
+			} else {
+				gfx.text(font(), "${swap.pairs.size} pair(s)", boxX + 8, detailY + 3, Colours.UNSELECTED_TEXT, false)
+			}
+			renderHotbarSwapAutoClose(gfx, setting, swap, boxX + boxWidth - 104, detailY - 3, mouseX, mouseY)
+
+			y += HOTBAR_SWAP_BOX_HEIGHT + 6
+		}
+
+		dropdown?.let { renderHotbarSwapDropdown(gfx, it, mouseX, mouseY) }
+	}
+
+	private fun fillMissingHotbarSwapItems(swap: HotbarSwapListSetting.Swap) {
+		val inventory = Minecraft.getInstance().player?.inventory ?: return
+		for (pair in swap.pairs) {
+			if (pair.item == null) {
+				pair.item = HotbarSwapListSetting.ItemSelector.fromStack(inventory.getItem(pair.inventorySlot))
+			}
+		}
+	}
+
+	private fun renderHotbarSwapAutoClose(
+		gfx: GuiGraphicsExtractor,
+		setting: HotbarSwapListSetting,
+		swap: HotbarSwapListSetting.Swap,
+		x: Int,
+		y: Int,
+		mouseX: Int,
+		mouseY: Int
+	) {
+		val checkX = x + 78
+		val checkY = y + 2
+		val hovered = Bounds(x, y, 98, 18).contains(mouseX.toDouble(), mouseY.toDouble())
+		gfx.text(font(), "Auto close", x, y + 5, if (swap.autoClose) Colours.TEXT else Colours.UNSELECTED_TEXT, false)
+		fill(gfx, checkX, checkY, checkX + 14, checkY + 14, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
+		drawRectOutline(gfx, checkX, checkY, 14, 14, Colours.GROUP_OUTLINE)
+		if (swap.autoClose) {
+			fill(gfx, checkX + 3, checkY + 3, checkX + 11, checkY + 11, Colours.SELECTED)
+		}
+		hitboxes.add(Hitbox(x, y, 98, 18) { button ->
+			if (button == 0) {
+				swap.autoClose = !swap.autoClose
+				setting.onEdit()
+			}
+		})
+	}
+
+	private fun renderHotbarSwapDropdown(gfx: GuiGraphicsExtractor, dropdown: HotbarSwapDropdown, mouseX: Int, mouseY: Int) {
+		val triggers = HotbarSwapTrigger.entries
+		val totalHeight = triggers.size * HOTBAR_TRIGGER_OPTION_HEIGHT
+		val topLimit = if (settingsBounds.height > 0) settingsBounds.y else panelY + 58
+		val bottomLimit = if (settingsBounds.height > 0) settingsBounds.y + settingsBounds.height - 8 else panelY + panelHeightPixels - 8
+		val belowSpace = bottomLimit - dropdown.y
+		val aboveSpace = dropdown.buttonY - topLimit
+		val openAbove = belowSpace < totalHeight && aboveSpace > belowSpace
+		val availableHeight = if (openAbove) aboveSpace else belowSpace
+		val visibleHeight = min(totalHeight, max(HOTBAR_TRIGGER_OPTION_HEIGHT * 3, availableHeight))
+			.coerceAtMost(totalHeight)
+			.coerceAtLeast(HOTBAR_TRIGGER_OPTION_HEIGHT)
+		val listY = if (openAbove) {
+			(dropdown.buttonY - visibleHeight).coerceAtLeast(topLimit)
+		} else {
+			dropdown.y
+		}
+		val maxScroll = max(0, totalHeight - visibleHeight).toDouble()
+		val scroll = hotbarTriggerScroll.getOrDefault(dropdown.key, 0.0).coerceIn(0.0, maxScroll)
+		hotbarTriggerScroll[dropdown.key] = scroll
+		hotbarTriggerDropdownKey = dropdown.key
+		hotbarTriggerDropdownBounds = Bounds(dropdown.x, listY, dropdown.width, visibleHeight)
+		hotbarTriggerDropdownMaxScroll = maxScroll
+
+		fill(gfx, dropdown.x, listY, dropdown.x + dropdown.width, listY + visibleHeight, Colours.PANEL)
+		hitboxes.add(Hitbox(dropdown.x, listY, dropdown.width, visibleHeight) {})
+		enableScissor(gfx, dropdown.x, listY, dropdown.x + dropdown.width, listY + visibleHeight)
+		var optionY = listY - scroll.roundToInt()
+		for (trigger in triggers) {
+			val visibleTop = max(optionY, listY)
+			val visibleBottom = min(optionY + HOTBAR_TRIGGER_OPTION_HEIGHT, listY + visibleHeight)
+			if (visibleBottom <= visibleTop) {
+				optionY += HOTBAR_TRIGGER_OPTION_HEIGHT
+				continue
+			}
+
+			val hovered = Bounds(dropdown.x, visibleTop, dropdown.width, visibleBottom - visibleTop).contains(mouseX.toDouble(), mouseY.toDouble())
+			fill(gfx, dropdown.x, optionY, dropdown.x + dropdown.width, optionY + HOTBAR_TRIGGER_OPTION_HEIGHT, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
+			drawRectOutline(gfx, dropdown.x, optionY, dropdown.width, HOTBAR_TRIGGER_OPTION_HEIGHT, Colours.GROUP_OUTLINE)
+			gfx.text(font(), fit(font(), trigger.displayName, dropdown.width - 12), dropdown.x + 5, optionY + 5, if (trigger == dropdown.swap.trigger) Colours.SELECTED else Colours.TEXT, false)
+			hitboxes.add(Hitbox(dropdown.x, visibleTop, dropdown.width, visibleBottom - visibleTop) { button ->
+				if (button == 0) {
+					dropdown.swap.trigger = trigger
+					dropdown.setting.onEdit()
+					expandedSettingKey = null
+					if (trigger != HotbarSwapTrigger.KEYBIND && waitingHotbarSwapKey?.swap?.id == dropdown.swap.id) {
+						waitingHotbarSwapKey = null
+					}
+				}
+			})
+			optionY += HOTBAR_TRIGGER_OPTION_HEIGHT
+		}
+		gfx.disableScissor()
+		drawRectOutline(gfx, dropdown.x, listY, dropdown.width, visibleHeight, Colours.GROUP_OUTLINE)
+
+		if (maxScroll > 0.0) {
+			val trackX = dropdown.x + dropdown.width - 4
+			val barHeight = max(16, (visibleHeight.toDouble() / totalHeight * visibleHeight).roundToInt())
+			val barY = listY + ((visibleHeight - barHeight) * (scroll / maxScroll)).roundToInt()
+			fill(gfx, trackX, listY + 2, trackX + 2, listY + visibleHeight - 2, Colours.GROUP_OUTLINE)
+			fill(gfx, trackX, barY, trackX + 2, barY + barHeight, Colours.SCROLL_BAR)
+		}
 	}
 
 	private fun renderColour(gfx: GuiGraphicsExtractor, row: SettingRow, setting: ColourSetting, mouseX: Int, mouseY: Int) {
@@ -831,6 +1211,7 @@ private class RsmStylePanel {
 				focusedSave = setting
 				focusedString = null
 				waitingKeybind = null
+				waitingHotbarSwapKey = null
 				writingSearch = false
 			}
 		})
@@ -897,6 +1278,21 @@ private class RsmStylePanel {
 	private fun isExpanded(setting: Setting<*>, key: String): Boolean =
 		expandedSettingKey == key && (setting is ModeSetting || setting is MultiBoolSetting || setting is ColourSetting)
 
+	private fun settingHeight(setting: Setting<*>): Int =
+		when (setting) {
+			is HotbarSwapListSetting -> if (setting.value.isEmpty()) {
+				SETTING_STEP
+			} else {
+				SETTING_STEP + setting.value.size * (HOTBAR_SWAP_BOX_HEIGHT + 6)
+			}
+			is InventoryButtonListSetting -> if (setting.value.isEmpty()) {
+				SETTING_STEP
+			} else {
+				SETTING_STEP + setting.value.size * (INVENTORY_BUTTON_BOX_HEIGHT + 6)
+			}
+			else -> SETTING_STEP
+		}
+
 	private fun selectedSettingScrollKey(): String {
 		val module = selectedModules[selectedCategory] ?: return ""
 		val group = selectedGroups[module.id] ?: return module.id
@@ -915,6 +1311,27 @@ private class RsmStylePanel {
 			GLFW.GLFW_KEY_BACKSPACE -> {
 				val next = currentValue.dropLast(1)
 				if (next.isNotBlank() || allowBlank) update(next)
+				true
+			}
+			else -> false
+		}
+	}
+
+	private fun handleInventoryButtonTextKey(input: KeyEvent, focused: InventoryButtonField): Boolean {
+		val button = focused.button() ?: run {
+			focusedInventoryButtonField = null
+			return false
+		}
+
+		return when (input.key()) {
+			GLFW.GLFW_KEY_ESCAPE,
+			GLFW.GLFW_KEY_ENTER -> {
+				focusedInventoryButtonField = null
+				true
+			}
+			GLFW.GLFW_KEY_BACKSPACE -> {
+				val current = focused.setting.fieldValue(button, focused.field)
+				focused.setting.setField(button, focused.field, current.dropLast(1))
 				true
 			}
 			else -> false
@@ -1038,10 +1455,42 @@ private class RsmStylePanel {
 		val groupName: String,
 		val setting: Setting<*>,
 		val x: Int,
-		val y: Int
+		val y: Int,
+		val width: Int
 	) {
 		val key: String = "$moduleId:$groupName:${setting.name}"
 	}
+
+	private data class WaitingHotbarSwapKey(
+		val setting: HotbarSwapListSetting,
+		val swap: HotbarSwapListSetting.Swap
+	)
+
+	private data class InventoryButtonField(
+		val setting: InventoryButtonListSetting,
+		val buttonId: String,
+		val field: InventoryButtonListSetting.Field
+	) {
+		fun button(): InventoryButtonListSetting.Button? =
+			setting.value.firstOrNull { it.id == buttonId }
+
+		fun matches(
+			setting: InventoryButtonListSetting,
+			button: InventoryButtonListSetting.Button,
+			field: InventoryButtonListSetting.Field
+		): Boolean =
+			this.setting === setting && this.buttonId == button.id && this.field == field
+	}
+
+	private data class HotbarSwapDropdown(
+		val setting: HotbarSwapListSetting,
+		val swap: HotbarSwapListSetting.Swap,
+		val key: String,
+		val x: Int,
+		val buttonY: Int,
+		val y: Int,
+		val width: Int
+	)
 
 	private data class ColourDrag(
 		val setting: ColourSetting,
@@ -1064,6 +1513,11 @@ private class RsmStylePanel {
 		private const val SETTINGS_PER_COLUMN = 15
 		private const val COLUMN_STEP = 310
 		private const val CONTROL_X = 114
+		private const val HOTBAR_SWAP_BOX_WIDTH = 448
+		private const val HOTBAR_SWAP_BOX_HEIGHT = 55
+		private const val HOTBAR_TRIGGER_OPTION_HEIGHT = 18
+		private const val INVENTORY_BUTTON_BOX_WIDTH = 448
+		private const val INVENTORY_BUTTON_BOX_HEIGHT = 84
 	}
 
 	private object SessionState {

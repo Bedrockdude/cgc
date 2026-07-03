@@ -12,6 +12,7 @@
 		"CommandSuggestionsMixin",
 		"ConnectionPacketMixin",
 		"DeltaTrackerFreezeMixin",
+		"EditBoxMixin",
 		"FontNickHiderMixin",
 		"MinecraftTickFreezeMixin",
 		"PlayerDestroySpeedMixin",

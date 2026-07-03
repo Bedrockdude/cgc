@@ -134,6 +134,9 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		if (targetButton != null && (targetPreAim || targetWaitingForButton) && shouldYieldPreAim(client)) {
+			if (clickPreAimedCurrentButtonIfReady(client)) {
+				return
+			}
 			clearTarget()
 		}
 
@@ -148,6 +151,10 @@ class AutoSSSpecsafe : CgcModule(
 
 		if (startClicksRemaining > 0) {
 			if (now >= nextStartClickAt) {
+				if (isStartButtonAlreadyAimed(client)) {
+					clickStartButtonIfAlreadyAimed(client)
+					return
+				}
 				beginLookClick(startButtonPos(), true)
 			}
 			return
@@ -192,6 +199,9 @@ class AutoSSSpecsafe : CgcModule(
 
 		val next = clicks[state]
 		if (client.level!!.getBlockState(next).`is`(Blocks.STONE_BUTTON)) {
+			if (clickCurrentSolveButtonIfAlreadyAimed(client, next)) {
+				return
+			}
 			beginLookClick(next, false)
 		}
 	}
@@ -199,6 +209,13 @@ class AutoSSSpecsafe : CgcModule(
 	override fun onWorldRenderStart() {
 		val client = Minecraft.getInstance()
 		if (areaCheck() && targetButton != null && client.player != null) {
+			val button = targetButton
+			if (button != null && targetIsStart && isStartButtonAlreadyAimed(client)) {
+				return
+			}
+			if (button != null && (targetPreAim || targetWaitingForButton) && isCurrentSolveButtonAlreadyAimed(client, button)) {
+				return
+			}
 			updateAimRotation(client)
 		}
 	}
@@ -362,9 +379,27 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
+		if (targetIsStart && isStartButtonAlreadyAimed(client)) {
+			if (clickStartButtonIfAlreadyAimed(client)) {
+				return
+			}
+			return
+		}
+
+		if ((targetPreAim || targetWaitingForButton) && isCurrentSolveButtonAlreadyAimed(client, button)) {
+			if (clickCurrentSolveButtonIfAlreadyAimed(client, button)) {
+				return
+			}
+			return
+		}
+
 		val aimResult = updateAimRotation(client)
 		if (aimResult == null) {
 			clearTarget()
+			return
+		}
+
+		if (clickPreAimedCurrentButtonIfReady(client)) {
 			return
 		}
 
@@ -444,8 +479,115 @@ class AutoSSSpecsafe : CgcModule(
 			flowingRetarget -> AimMode.CHAINED_RETARGET
 			else -> AimMode.NORMAL_BUTTON
 		}
+		if (startsSolveSequence(mode)) {
+			resetGridMotionHistory()
+		}
 		aimController.start(player, aimPoint, getAimSettings(mode), mode, buildMoveContext(button, mode))
 		recordGridTarget(button, mode)
+	}
+
+	private fun clickStartButtonIfAlreadyAimed(client: Minecraft): Boolean {
+		val level = client.level ?: return false
+		val now = System.currentTimeMillis()
+		if (now < nextStartClickAt || now - lastClickTime < currentClickDelayMs || !isStartButtonAlreadyAimed(client)) {
+			return false
+		}
+
+		val button = startButtonPos()
+		targetButton = button
+		targetIsStart = true
+		targetPreAim = false
+		targetOpeningPreAim = false
+		targetPractice = false
+		targetPracticeReturningToStart = false
+		targetWaitingForButton = false
+		targetWaitCorrectionStarted = false
+		targetWaitCorrectionOnRealButton = false
+		preAimButton = null
+		targetAimPoint = startAimPoint ?: getAimPoint(level, button)
+		clearOpeningPreAim()
+		return clickTarget(client)
+	}
+
+	private fun isStartButtonAlreadyAimed(client: Minecraft): Boolean {
+		val level = client.level ?: return false
+		val player = client.player ?: return false
+		val button = startButtonPos()
+		if (!doingSS || startClicksRemaining <= 0 || client.gameMode == null) {
+			return false
+		}
+		if (!level.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
+			return false
+		}
+		if (player.distanceToSqr(Vec3.atCenterOf(button)) > MAX_BUTTON_DISTANCE_SQ) {
+			return false
+		}
+		return getLookHit(client, button) != null && isLookingAtPhysicalStartButton(player)
+	}
+
+	private fun isLookingAtPhysicalStartButton(player: LocalPlayer): Boolean {
+		val eye = player.eyePosition
+		val look = player.lookAngle
+		if (kotlin.math.abs(look.x) <= START_BUTTON_FACE_RAY_EPSILON) {
+			return false
+		}
+
+		val distanceToFace = (START_BUTTON.x - eye.x) / look.x
+		if (distanceToFace < 0.0 || distanceToFace > RAYCAST_DISTANCE) {
+			return false
+		}
+
+		val faceHit = eye.add(look.scale(distanceToFace))
+		val yOffset = kotlin.math.abs(faceHit.y - START_BUTTON.y)
+		val zOffset = kotlin.math.abs(faceHit.z - START_BUTTON.z)
+		return yOffset <= START_BUTTON_PHYSICAL_HALF_HEIGHT &&
+			zOffset <= START_BUTTON_PHYSICAL_HALF_WIDTH
+	}
+
+	private fun clickPreAimedCurrentButtonIfReady(client: Minecraft): Boolean {
+		if (!targetPreAim && !targetWaitingForButton) {
+			return false
+		}
+
+		val button = targetButton ?: return false
+		return clickCurrentSolveButtonIfAlreadyAimed(client, button)
+	}
+
+	private fun clickCurrentSolveButtonIfAlreadyAimed(client: Minecraft, button: BlockPos): Boolean {
+		val level = client.level ?: return false
+		if (!readyToSolveCurrentPattern(client) || !isCurrentSolveButtonAlreadyAimed(client, button)) {
+			return false
+		}
+
+		targetButton = button
+		targetIsStart = false
+		targetPreAim = false
+		targetOpeningPreAim = false
+		targetPractice = false
+		targetPracticeReturningToStart = false
+		targetWaitingForButton = false
+		targetWaitCorrectionStarted = false
+		targetWaitCorrectionOnRealButton = false
+		preAimButton = null
+		targetAimPoint = getAimPoint(level, button)
+		clearOpeningPreAim()
+		seedSolveSequenceStart(button)
+		return clickTarget(client)
+	}
+
+	private fun isCurrentSolveButtonAlreadyAimed(client: Minecraft, button: BlockPos): Boolean {
+		val level = client.level ?: return false
+		val player = client.player ?: return false
+		if (!doingSS || startClicksRemaining > 0 || state != 0 || clicks.getOrNull(state) != button) {
+			return false
+		}
+		if (!level.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
+			return false
+		}
+		if (player.distanceToSqr(Vec3.atCenterOf(button)) > MAX_BUTTON_DISTANCE_SQ) {
+			return false
+		}
+		return getLookHit(client, button) != null
 	}
 
 	private fun clickTarget(client: Minecraft): Boolean {
@@ -890,6 +1032,11 @@ class AutoSSSpecsafe : CgcModule(
 		val currentMotion = GridMotion(rowDelta, columnDelta)
 		val alignment = previousGridMotion?.alignmentWith(currentMotion)
 		val nextMotion = nextGridMotion(button, mode)
+		val nextChebyshevDistance = if (nextMotion == null) {
+			0
+		} else {
+			max(kotlin.math.abs(nextMotion.row), kotlin.math.abs(nextMotion.column))
+		}
 		return AimMoveContext(
 			rowDelta = rowDelta,
 			columnDelta = columnDelta,
@@ -898,7 +1045,8 @@ class AutoSSSpecsafe : CgcModule(
 			diagonal = diagonal,
 			continuingDirection = alignment != null && alignment >= 0.72,
 			reversingDirection = alignment != null && alignment <= -0.30,
-			passesThroughTarget = nextMotion != null && currentMotion.alignmentWith(nextMotion) >= 0.72
+			passesThroughTarget = nextMotion != null && currentMotion.alignmentWith(nextMotion) >= 0.72,
+			nextChebyshevDistance = nextChebyshevDistance
 		)
 	}
 
@@ -917,6 +1065,23 @@ class AutoSSSpecsafe : CgcModule(
 		}
 		previousGridButton = button
 	}
+
+	private fun seedSolveSequenceStart(button: BlockPos) {
+		if (state != 0) {
+			return
+		}
+
+		resetGridMotionHistory()
+		recordGridTarget(button, AimMode.NORMAL_BUTTON)
+	}
+
+	private fun resetGridMotionHistory() {
+		previousGridButton = null
+		previousGridMotion = null
+	}
+
+	private fun startsSolveSequence(mode: AimMode): Boolean =
+		mode == AimMode.NORMAL_BUTTON && state == 0
 
 	private fun tracksGridMotion(mode: AimMode): Boolean =
 		when (mode) {
@@ -1136,8 +1301,7 @@ class AutoSSSpecsafe : CgcModule(
 		practiceMaxPasses = 0
 		practiceReturnAt = 0L
 		practiceResumeAt = 0L
-		previousGridButton = null
-		previousGridMotion = null
+		resetGridMotionHistory()
 		clearAutoRestart()
 		clearOpeningPreAim()
 		donePopupUntil = 0L
@@ -1232,6 +1396,9 @@ class AutoSSSpecsafe : CgcModule(
 		private val DETECT = BlockPos(110, 123, 92)
 		private const val MAX_BUTTON_DISTANCE_SQ = 36.0
 		private const val RAYCAST_DISTANCE = 6.0
+		private const val START_BUTTON_FACE_RAY_EPSILON = 1.0E-5
+		private const val START_BUTTON_PHYSICAL_HALF_HEIGHT = 0.145
+		private const val START_BUTTON_PHYSICAL_HALF_WIDTH = 0.205
 		private const val FINAL_SEQUENCE_LENGTH = 5
 		private const val PRACTICE_UNLOCK_SEQUENCE_COUNT = 2
 		private const val PRACTICE_BUTTON_FACE_X = 0.875
@@ -1251,8 +1418,8 @@ class AutoSSSpecsafe : CgcModule(
 		private const val PRACTICE_RETURN_RANDOMNESS = 0.045
 		private const val AIM_TOLERANCE = 0.18
 		private const val PRE_AIM_TOLERANCE = 0.07
-		private const val OVERSHOOT_STRENGTH = 1.2
-		private const val MICRO_CORRECTION = 0.45
+		private const val OVERSHOOT_STRENGTH = 1.0
+		private const val MICRO_CORRECTION = 0.55
 		private const val CLICK_DELAY_MIN_MS = 8L
 		private const val CLICK_DELAY_MAX_MS = 14L
 		private const val MIN_CLICK_DELAY_VARIANCE_MS = 4L

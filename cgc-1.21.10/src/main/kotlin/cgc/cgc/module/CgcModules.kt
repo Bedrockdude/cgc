@@ -11,10 +11,14 @@ import cgc.cgc.module.impl.dungeon.FastLeap
 import cgc.cgc.module.impl.dungeon.LeapCounter
 import cgc.cgc.module.impl.dungeon.SSTriggerBot
 import cgc.cgc.module.impl.dungeon.TerminalSolver
+import cgc.cgc.module.impl.dungeon.TriggerBot
+import cgc.cgc.module.impl.fixies.CapitalLetterCommands
+import cgc.cgc.module.impl.general.InventoryButtons
 import cgc.cgc.module.impl.movement.Ether
 import cgc.cgc.module.impl.movement.VelocityBuffer
 import cgc.cgc.module.impl.other.DNYapper
 import cgc.cgc.module.impl.player.BonzoHelper
+import cgc.cgc.module.impl.player.HotbarSwitcher
 import cgc.cgc.module.impl.player.MaskHelper
 import cgc.cgc.module.impl.render.CgcClickGuiModule
 import cgc.cgc.module.impl.render.EnderPearlTrajectory
@@ -51,9 +55,13 @@ object CgcModules {
 			TerminalSolver(),
 			AutoSSSpecsafe(),
 			SSTriggerBot(),
+			TriggerBot(),
 			EnderPearlTrajectory(),
 			OpSec(),
+			CapitalLetterCommands(),
+			InventoryButtons(),
 			BonzoHelper(),
+			HotbarSwitcher(),
 			MaskHelper(),
 			DNYapper()
 		)

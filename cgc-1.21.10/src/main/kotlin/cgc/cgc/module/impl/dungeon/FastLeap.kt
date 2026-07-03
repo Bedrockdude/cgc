@@ -2,18 +2,17 @@ package cgc.cgc.module.impl.dungeon
 
 import cgc.cgc.data.DungeonClass
 import cgc.cgc.data.DungeonPlayer
-import cgc.cgc.data.Keybind
 import cgc.cgc.data.Phase7
 import cgc.cgc.dungeon.DungeonState
 import cgc.cgc.location.Floor
 import cgc.cgc.location.Island
 import cgc.cgc.location.Location
+import cgc.cgc.module.ClientTickModule
 import cgc.cgc.module.CgcModule
 import cgc.cgc.module.ModuleCategory
 import cgc.cgc.module.PacketReceiveModule
 import cgc.cgc.module.WorldLoadModule
 import cgc.cgc.module.setting.BooleanSetting
-import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.module.setting.StringSetting
@@ -35,8 +34,7 @@ class FastLeap : CgcModule(
 	category = ModuleCategory.DUNGEONS,
 	description = "Quickly leaps to the configured class or player for the current dungeon phase.",
 	defaultEnabled = false
-), PacketReceiveModule, WorldLoadModule {
-	private val key = KeybindSetting("Key", Keybind(action = this::doAutoLeap))
+), ClientTickModule, PacketReceiveModule, WorldLoadModule {
 	private val cooldown = NumberSetting("Cooldown", 0.0, 5000.0, 2000.0, 50.0, " ms")
 	private val chatMessage = BooleanSetting("Chat Message", false)
 	private val p3Only = BooleanSetting("P3 Only", true)
@@ -69,11 +67,11 @@ class FastLeap : CgcModule(
 
 	private var lastUsed = 0L
 	private var queuedLeap = false
+	private var wasLeftClickDown = false
 
 	init {
 		instance = this
 		registerProperty(
-			key,
 			cooldown,
 			chatMessage,
 			p3Only,
@@ -98,13 +96,18 @@ class FastLeap : CgcModule(
 		)
 	}
 
-	override fun onEnable() {
-		key.register()
+	override fun onDisable() {
+		reset()
 	}
 
-	override fun onDisable() {
-		key.unregister()
-		reset()
+	override fun onClientTick(client: Minecraft) {
+		leapMenu.tickTimeout(MENU_TIMEOUT_MS)
+
+		val leftClickDown = client.options.keyAttack.isDown
+		if (leftClickDown && !wasLeftClickDown) {
+			doAutoLeapInternal()
+		}
+		wasLeftClickDown = leftClickDown
 	}
 
 	override fun onWorldLoad() {
@@ -126,10 +129,7 @@ class FastLeap : CgcModule(
 	override fun reset() {
 		leapMenu.clear()
 		queuedLeap = false
-	}
-
-	private fun doAutoLeap() {
-		doAutoLeapInternal()
+		wasLeftClickDown = false
 	}
 
 	private fun doAutoLeapInternal(): Boolean {
@@ -244,6 +244,7 @@ class FastLeap : CgcModule(
 	companion object {
 		private val CLASS_MODES = listOf("Archer", "Mage", "Berserk", "Healer", "Tank", "Custom")
 		private val CLASS_MODES_WITH_AUTO = listOf("Archer", "Mage", "Berserk", "Healer", "Tank", "Custom", "Auto")
+		private const val MENU_TIMEOUT_MS = 1500L
 		private var instance: FastLeap? = null
 
 		@JvmStatic
