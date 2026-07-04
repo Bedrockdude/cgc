@@ -1,7 +1,7 @@
 package cgc.cgc.module.impl.general
 
 import cgc.cgc.client.CgcCommandRegistry
-import cgc.cgc.config.CgcConfigStore
+import cgc.cgc.client.gui.InventoryButtonEditorScreen
 import cgc.cgc.module.CgcModule
 import cgc.cgc.module.ModuleCategory
 import cgc.cgc.module.setting.BooleanSetting
@@ -27,12 +27,10 @@ class InventoryButtons : CgcModule(
 	defaultEnabled = false
 ) {
 	private val doubleClick = BooleanSetting("Double Click", false)
-	private val buttons = InventoryButtonListSetting("Buttons")
-	private val addButton = ButtonSetting("Add Button", "Add Button", { buttons.addButton() })
+	private val buttons = InventoryButtonListSetting("Buttons", supplier = { false })
+	private val editGui = ButtonSetting("Edit GUI", "Edit GUI", { openEditor() })
 
 	private var activeButtonId: String? = null
-	private var activeOffsetX = 0
-	private var activeOffsetY = 0
 	private var pressedX = 0.0
 	private var pressedY = 0.0
 	private var pressedDoubleClick = false
@@ -40,7 +38,14 @@ class InventoryButtons : CgcModule(
 
 	init {
 		instance = this
-		registerProperty(doubleClick, addButton, buttons)
+		registerProperty(doubleClick, editGui, buttons)
+	}
+
+	private fun openEditor() {
+		val client = Minecraft.getInstance()
+		val player = client.player ?: return
+		setEnabled(true)
+		client.setScreen(InventoryButtonEditorScreen(buttons, player, client.screen))
 	}
 
 	private fun render(screen: AbstractContainerScreen<*>, gfx: GuiGraphicsExtractor, mouseX: Int, mouseY: Int) {
@@ -49,6 +54,7 @@ class InventoryButtons : CgcModule(
 			return
 		}
 
+		gfx.nextStratum()
 		for (button in buttons.value) {
 			val maxX = screen.width - InventoryButtonListSetting.BUTTON_SIZE
 			val maxY = screen.height - InventoryButtonListSetting.BUTTON_SIZE
@@ -70,9 +76,8 @@ class InventoryButtons : CgcModule(
 			val stack = iconStack(button.iconItem)
 			if (!stack.isEmpty) {
 				gfx.item(stack, button.x + 6, button.y + 6)
-			} else if (button.label.isNotBlank()) {
-				gfx.centeredText(Minecraft.getInstance().font, button.label.take(2), button.x + 14, button.y + 10, TEXT)
 			}
+			gfx.centeredText(Minecraft.getInstance().font, button.label.take(2).ifBlank { "IB" }, button.x + 14, button.y + 10, TEXT)
 
 			if (hovered) {
 				val label = button.label.ifBlank { button.command.ifBlank { "Inventory Button" } }
@@ -88,8 +93,6 @@ class InventoryButtons : CgcModule(
 
 		val button = buttonAt(click.x(), click.y()) ?: return false
 		activeButtonId = button.id
-		activeOffsetX = (click.x() - button.x).toInt()
-		activeOffsetY = (click.y() - button.y).toInt()
 		pressedX = click.x()
 		pressedY = click.y()
 		pressedDoubleClick = doubled
@@ -98,7 +101,7 @@ class InventoryButtons : CgcModule(
 	}
 
 	private fun mouseDragged(screen: AbstractContainerScreen<*>, click: MouseButtonEvent): Boolean {
-		val button = activeButton() ?: return false
+		activeButton() ?: return false
 		if (!isOwnInventory(screen) || click.button() != 0) {
 			return false
 		}
@@ -110,13 +113,6 @@ class InventoryButtons : CgcModule(
 			return true
 		}
 
-		buttons.moveButton(
-			button,
-			(click.x() - activeOffsetX).toInt(),
-			(click.y() - activeOffsetY).toInt(),
-			screen.width - InventoryButtonListSetting.BUTTON_SIZE,
-			screen.height - InventoryButtonListSetting.BUTTON_SIZE
-		)
 		return true
 	}
 
@@ -131,7 +127,6 @@ class InventoryButtons : CgcModule(
 		val shouldRun = !moved && (!doubleClick.value || pressedDoubleClick)
 		clearDrag()
 		if (moved) {
-			CgcConfigStore.saveAll()
 			return true
 		}
 
@@ -163,6 +158,13 @@ class InventoryButtons : CgcModule(
 	private fun buttonAt(mouseX: Double, mouseY: Double): InventoryButtonListSetting.Button? =
 		buttons.value.asReversed().firstOrNull { contains(it, mouseX, mouseY) }
 
+	private fun clampButton(screen: AbstractContainerScreen<*>, button: InventoryButtonListSetting.Button) {
+		val maxX = screen.width - InventoryButtonListSetting.BUTTON_SIZE
+		val maxY = screen.height - InventoryButtonListSetting.BUTTON_SIZE
+		button.x = button.x.coerceIn(0, maxX.coerceAtLeast(0))
+		button.y = button.y.coerceIn(0, maxY.coerceAtLeast(0))
+	}
+
 	private fun contains(button: InventoryButtonListSetting.Button, mouseX: Double, mouseY: Double): Boolean =
 		mouseX >= button.x &&
 			mouseX <= button.x + InventoryButtonListSetting.BUTTON_SIZE &&
@@ -171,8 +173,6 @@ class InventoryButtons : CgcModule(
 
 	private fun clearDrag() {
 		activeButtonId = null
-		activeOffsetX = 0
-		activeOffsetY = 0
 		pressedX = 0.0
 		pressedY = 0.0
 		pressedDoubleClick = false
@@ -180,7 +180,7 @@ class InventoryButtons : CgcModule(
 	}
 
 	private fun isOwnInventory(screen: AbstractContainerScreen<*>): Boolean =
-		screen is InventoryScreen
+		screen is InventoryScreen && screen !is InventoryButtonEditorScreen
 
 	override fun reset() {
 		clearDrag()
@@ -203,10 +203,10 @@ class InventoryButtons : CgcModule(
 		private var instance: InventoryButtons? = null
 
 		private const val DRAG_THRESHOLD = 3.0
-		private const val FILL = 0xAA10141B.toInt()
-		private const val HOVER_FILL = 0xCC1D2733.toInt()
-		private const val ACTIVE_FILL = 0xCC24364A.toInt()
-		private const val OUTLINE = 0x88FFFFFF.toInt()
+		private const val FILL = 0xFF202733.toInt()
+		private const val HOVER_FILL = 0xFF2D3B4E.toInt()
+		private const val ACTIVE_FILL = 0xFF3A5877.toInt()
+		private const val OUTLINE = 0xFFFFFFFF.toInt()
 		private const val ACTIVE_OUTLINE = 0xFF55AAFF.toInt()
 		private const val TEXT = 0xFFFFFFFF.toInt()
 

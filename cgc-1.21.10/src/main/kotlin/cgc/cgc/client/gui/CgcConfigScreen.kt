@@ -11,7 +11,6 @@ import cgc.cgc.module.setting.ColourSetting
 import cgc.cgc.module.setting.HotbarSwapListSetting
 import cgc.cgc.module.setting.HotbarSwapTrigger
 import cgc.cgc.module.setting.HotbarSwapType
-import cgc.cgc.module.setting.InventoryButtonListSetting
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.MultiBoolSetting
@@ -113,7 +112,6 @@ private class RsmStylePanel {
 	private var writingSearch = false
 	private var focusedString: StringSetting? = null
 	private var focusedSave: SaveSetting<*>? = null
-	private var focusedInventoryButtonField: InventoryButtonField? = null
 	private var waitingKeybind: KeybindSetting? = null
 	private var waitingHotbarSwapKey: WaitingHotbarSwapKey? = null
 	private var draggingNumber: NumberSetting? = null
@@ -166,7 +164,6 @@ private class RsmStylePanel {
 			}
 		}
 
-		focusedInventoryButtonField = null
 		for (hitbox in hitboxes.asReversed()) {
 			if (hitbox.contains(mouseX, mouseY)) {
 				hitbox.onClick(button)
@@ -177,7 +174,6 @@ private class RsmStylePanel {
 		writingSearch = false
 		focusedString = null
 		focusedSave = null
-		focusedInventoryButtonField = null
 		waitingHotbarSwapKey = null
 		if (button == 0) expandedSettingKey = null
 		return false
@@ -235,15 +231,6 @@ private class RsmStylePanel {
 			return true
 		}
 
-		focusedInventoryButtonField?.let { focused ->
-			if (!typedChar.isISOControl()) {
-				focused.button()?.let { button ->
-					focused.setting.setField(button, focused.field, focused.setting.fieldValue(button, focused.field) + typedChar)
-				}
-			}
-			return true
-		}
-
 		return false
 	}
 
@@ -281,10 +268,6 @@ private class RsmStylePanel {
 
 		focusedSave?.let { setting ->
 			return handleTextKey(input, setting.fileName, allowBlank = true) { setting.setFileName(it) }
-		}
-
-		focusedInventoryButtonField?.let { focused ->
-			return handleInventoryButtonTextKey(input, focused)
 		}
 
 		return false
@@ -612,7 +595,7 @@ private class RsmStylePanel {
 		val settings = group.value.getShownSettings()
 		val scrollKey = "${module.id}:${group.name}"
 		val rows = settings.filter { it !is cgc.cgc.module.setting.DragSetting }
-		if (rows.any { it is HotbarSwapListSetting || it is InventoryButtonListSetting }) {
+		if (rows.any { it is HotbarSwapListSetting }) {
 			renderVariableGroupSettings(gfx, module, group, rows, scrollKey, startX, startY, width, height, mouseX, mouseY)
 			return
 		}
@@ -699,10 +682,6 @@ private class RsmStylePanel {
 		val setting = row.setting
 		if (setting is HotbarSwapListSetting) {
 			renderHotbarSwaps(gfx, row, setting, mouseX, mouseY)
-			return
-		}
-		if (setting is InventoryButtonListSetting) {
-			renderInventoryButtons(gfx, row, setting)
 			return
 		}
 
@@ -861,69 +840,6 @@ private class RsmStylePanel {
 		gfx.centeredText(font(), fit(font(), setting.value, 188), boxX + 100, row.y - 2, Colours.TEXT)
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) setting.press()
-		})
-	}
-
-	private fun renderInventoryButtons(gfx: GuiGraphicsExtractor, row: SettingRow, setting: InventoryButtonListSetting) {
-		gfx.text(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
-		if (setting.value.isEmpty()) {
-			gfx.text(font(), "No buttons added", row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
-			return
-		}
-
-		var y = row.y + 18
-		val boxWidth = min(row.width, INVENTORY_BUTTON_BOX_WIDTH)
-		for ((index, button) in setting.value.withIndex()) {
-			val boxX = row.x
-			val boxY = y
-			fill(gfx, boxX, boxY, boxX + boxWidth, boxY + INVENTORY_BUTTON_BOX_HEIGHT, Colours.PANEL)
-			drawRectOutline(gfx, boxX, boxY, boxWidth, INVENTORY_BUTTON_BOX_HEIGHT, Colours.GROUP_OUTLINE)
-			gfx.text(font(), "Button ${index + 1}", boxX + 8, boxY + 7, Colours.TEXT, false)
-
-			val removeX = boxX + boxWidth - 25
-			drawInputBox(gfx, removeX, boxY + 5, 18, 19, false)
-			gfx.centeredText(font(), "X", removeX + 9, boxY + 11, Colours.TEXT)
-			hitboxes.add(Hitbox(removeX, boxY + 5, 18, 19) { mouseButton ->
-				if (mouseButton == 0) {
-					setting.removeButton(button)
-				}
-			})
-
-			renderInventoryButtonField(gfx, setting, button, InventoryButtonListSetting.Field.LABEL, "Label", boxX + 8, boxY + 33, 176)
-			renderInventoryButtonField(gfx, setting, button, InventoryButtonListSetting.Field.ICON, "Icon", boxX + 202, boxY + 33, boxWidth - 235)
-			renderInventoryButtonField(gfx, setting, button, InventoryButtonListSetting.Field.COMMAND, "Command", boxX + 8, boxY + 59, boxWidth - 16)
-
-			y += INVENTORY_BUTTON_BOX_HEIGHT + 6
-		}
-	}
-
-	private fun renderInventoryButtonField(
-		gfx: GuiGraphicsExtractor,
-		setting: InventoryButtonListSetting,
-		button: InventoryButtonListSetting.Button,
-		field: InventoryButtonListSetting.Field,
-		label: String,
-		x: Int,
-		y: Int,
-		width: Int
-	) {
-		val labelWidth = if (field == InventoryButtonListSetting.Field.COMMAND) 56 else 38
-		gfx.text(font(), label, x, y + 6, Colours.UNSELECTED_TEXT, false)
-		val inputX = x + labelWidth
-		val inputWidth = max(40, width - labelWidth)
-		val focused = focusedInventoryButtonField?.matches(setting, button, field) == true
-		drawInputBox(gfx, inputX, y, inputWidth, 19, focused)
-		val value = setting.fieldValue(button, field) + if (focused) "|" else ""
-		gfx.text(font(), fit(font(), value, inputWidth - 10), inputX + 5, y + 6, Colours.TEXT, false)
-		hitboxes.add(Hitbox(inputX, y, inputWidth, 19) { mouseButton ->
-			if (mouseButton == 0) {
-				focusedInventoryButtonField = InventoryButtonField(setting, button.id, field)
-				focusedString = null
-				focusedSave = null
-				waitingKeybind = null
-				waitingHotbarSwapKey = null
-				writingSearch = false
-			}
 		})
 	}
 
@@ -1285,11 +1201,6 @@ private class RsmStylePanel {
 			} else {
 				SETTING_STEP + setting.value.size * (HOTBAR_SWAP_BOX_HEIGHT + 6)
 			}
-			is InventoryButtonListSetting -> if (setting.value.isEmpty()) {
-				SETTING_STEP
-			} else {
-				SETTING_STEP + setting.value.size * (INVENTORY_BUTTON_BOX_HEIGHT + 6)
-			}
 			else -> SETTING_STEP
 		}
 
@@ -1311,27 +1222,6 @@ private class RsmStylePanel {
 			GLFW.GLFW_KEY_BACKSPACE -> {
 				val next = currentValue.dropLast(1)
 				if (next.isNotBlank() || allowBlank) update(next)
-				true
-			}
-			else -> false
-		}
-	}
-
-	private fun handleInventoryButtonTextKey(input: KeyEvent, focused: InventoryButtonField): Boolean {
-		val button = focused.button() ?: run {
-			focusedInventoryButtonField = null
-			return false
-		}
-
-		return when (input.key()) {
-			GLFW.GLFW_KEY_ESCAPE,
-			GLFW.GLFW_KEY_ENTER -> {
-				focusedInventoryButtonField = null
-				true
-			}
-			GLFW.GLFW_KEY_BACKSPACE -> {
-				val current = focused.setting.fieldValue(button, focused.field)
-				focused.setting.setField(button, focused.field, current.dropLast(1))
 				true
 			}
 			else -> false
@@ -1466,22 +1356,6 @@ private class RsmStylePanel {
 		val swap: HotbarSwapListSetting.Swap
 	)
 
-	private data class InventoryButtonField(
-		val setting: InventoryButtonListSetting,
-		val buttonId: String,
-		val field: InventoryButtonListSetting.Field
-	) {
-		fun button(): InventoryButtonListSetting.Button? =
-			setting.value.firstOrNull { it.id == buttonId }
-
-		fun matches(
-			setting: InventoryButtonListSetting,
-			button: InventoryButtonListSetting.Button,
-			field: InventoryButtonListSetting.Field
-		): Boolean =
-			this.setting === setting && this.buttonId == button.id && this.field == field
-	}
-
 	private data class HotbarSwapDropdown(
 		val setting: HotbarSwapListSetting,
 		val swap: HotbarSwapListSetting.Swap,
@@ -1516,8 +1390,6 @@ private class RsmStylePanel {
 		private const val HOTBAR_SWAP_BOX_WIDTH = 448
 		private const val HOTBAR_SWAP_BOX_HEIGHT = 55
 		private const val HOTBAR_TRIGGER_OPTION_HEIGHT = 18
-		private const val INVENTORY_BUTTON_BOX_WIDTH = 448
-		private const val INVENTORY_BUTTON_BOX_HEIGHT = 84
 	}
 
 	private object SessionState {

@@ -17,16 +17,27 @@ class InventoryButtonListSetting(
 	}
 
 	fun addButton(): Button {
-		val offset = value.size * 34
+		val button = createButton(8 + value.size * 34, 8)
+		value.add(button)
+		onEdit()
+		return button
+	}
+
+	fun addButtonAt(x: Int, y: Int, maxX: Int, maxY: Int): Button {
+		val button = createButton(x.coerceIn(0, maxX.coerceAtLeast(0)), y.coerceIn(0, maxY.coerceAtLeast(0)))
+		value.add(button)
+		onEdit()
+		return button
+	}
+
+	private fun createButton(x: Int, y: Int): Button {
 		val button = Button(
 			label = "Button ${value.size + 1}",
 			command = "",
 			iconItem = DEFAULT_ICON,
-			x = 8 + offset,
-			y = 8
+			x = x,
+			y = y
 		)
-		value.add(button)
-		onEdit()
 		return button
 	}
 
