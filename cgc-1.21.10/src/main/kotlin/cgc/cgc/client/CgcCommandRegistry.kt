@@ -1,9 +1,12 @@
 package cgc.cgc.client
 
 import cgc.cgc.config.CgcSettings
+import cgc.cgc.client.gui.AutoCEditScreen
 import cgc.cgc.client.gui.CgcConfigScreen
 import cgc.cgc.client.gui.CgcUiScreen
 import cgc.cgc.module.CgcModules
+import cgc.cgc.module.impl.dungeon.AutoC
+import cgc.cgc.module.impl.dungeon.autoc.AutoCNodeType
 import cgc.cgc.module.impl.dungeon.LeapCounter
 import cgc.cgc.utils.ChatUtils
 import com.mojang.brigadier.CommandDispatcher
@@ -14,7 +17,9 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder
 import com.mojang.brigadier.builder.RequiredArgumentBuilder
 import com.mojang.brigadier.context.CommandContext
 import com.mojang.brigadier.exceptions.CommandSyntaxException
+import com.mojang.brigadier.suggestion.Suggestions
 import com.mojang.brigadier.suggestion.SuggestionProvider
+import com.mojang.brigadier.suggestion.SuggestionsBuilder
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource
 import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
@@ -23,11 +28,21 @@ import net.minecraft.commands.SharedSuggestionProvider
 import net.minecraft.network.chat.ComponentUtils
 import java.text.Normalizer
 import java.util.Locale
+import java.util.concurrent.CompletableFuture
 
 object CgcCommandRegistry {
+	private val AC_COMMON_ARG_SUGGESTIONS = listOf("AS", "nr", "h1", "h2", "h3", "h4", "R(0.5)", "R(1)", "R(2)", "wait(0.5)", "wait(1)", "maxA(1)", "maxA(3)")
 	private val dispatcher = CommandDispatcher<ClientSuggestionProvider>()
 	private val phaseSuggestions = suggestions("p1", "p2", "p3", "p4", "5p")
 	private val classSuggestions = suggestions("A", "M", "B", "T", "H", "A M B T H")
+	private val autoCNodeSuggestions = suggestions(*AutoCNodeType.commandNames())
+	private val fabricAutoCNodeSuggestions = fabricSuggestions(*AutoCNodeType.commandNames())
+	private val autoCArgSuggestions = SuggestionProvider<ClientSuggestionProvider> { ctx, builder ->
+		suggestAcArgs(StringArgumentType.getString(ctx, "node"), builder)
+	}
+	private val fabricAutoCArgSuggestions = SuggestionProvider<FabricClientCommandSource> { ctx, builder ->
+		suggestAcArgs(StringArgumentType.getString(ctx, "node"), builder)
+	}
 
 	init {
 		rebuild()
@@ -44,6 +59,7 @@ object CgcCommandRegistry {
 	) {
 		dispatcher.register(
 			fabricLiteral("cgc")
+				.then(fabricAutoCCommand("ac"))
 				.then(fabricLiteral("ui").executes {
 					openUi()
 					1
@@ -53,6 +69,7 @@ object CgcCommandRegistry {
 					1
 				}
 		)
+		dispatcher.register(fabricAutoCCommand("ac"))
 		registerFabricLeapCounter(dispatcher, "lc")
 		registerFabricLeapCounter(dispatcher, "leapcounter")
 	}
@@ -105,6 +122,7 @@ object CgcCommandRegistry {
 		})
 		dispatcher.register(
 			literal("cgc")
+				.then(autoCCommand("ac"))
 				.then(literal("ui").executes {
 					Minecraft.getInstance().setScreen(CgcUiScreen())
 					1
@@ -114,9 +132,82 @@ object CgcCommandRegistry {
 					1
 				}
 		)
+		dispatcher.register(autoCCommand("ac"))
 		registerLeapCounter("lc")
 		registerLeapCounter("leapcounter")
 	}
+
+	private fun autoCCommand(name: String): LiteralArgumentBuilder<ClientSuggestionProvider> =
+		literal(name)
+			.then(
+				literal("add")
+					.then(
+						argument("node", StringArgumentType.word())
+							.suggests(autoCNodeSuggestions)
+							.then(
+								argument("args", StringArgumentType.greedyString())
+									.suggests(autoCArgSuggestions)
+									.executes { ctx ->
+										addAcNode(
+											StringArgumentType.getString(ctx, "node"),
+											StringArgumentType.getString(ctx, "args")
+										)
+									}
+							)
+							.executes { ctx -> addAcNode(StringArgumentType.getString(ctx, "node"), "") }
+					)
+					.executes {
+						acUsage()
+						1
+					}
+			)
+			.then(literal("remove").executes { removeAcNode() })
+			.then(literal("undo").executes { undoAcNode() })
+			.then(literal("edit").executes { editAcNodes() })
+			.then(literal("help").executes {
+				acUsage()
+				1
+			})
+			.executes {
+				acUsage()
+				1
+			}
+
+	private fun fabricAutoCCommand(name: String): LiteralArgumentBuilder<FabricClientCommandSource> =
+		fabricLiteral(name)
+			.then(
+				fabricLiteral("add")
+					.then(
+						fabricArgument("node", StringArgumentType.word())
+							.suggests(fabricAutoCNodeSuggestions)
+							.then(
+								fabricArgument("args", StringArgumentType.greedyString())
+									.suggests(fabricAutoCArgSuggestions)
+									.executes { ctx ->
+										addAcNode(
+											StringArgumentType.getString(ctx, "node"),
+											StringArgumentType.getString(ctx, "args")
+										)
+									}
+							)
+							.executes { ctx -> addAcNode(StringArgumentType.getString(ctx, "node"), "") }
+					)
+					.executes {
+						acUsage()
+						1
+					}
+			)
+			.then(fabricLiteral("remove").executes { removeAcNode() })
+			.then(fabricLiteral("undo").executes { undoAcNode() })
+			.then(fabricLiteral("edit").executes { editAcNodes() })
+			.then(fabricLiteral("help").executes {
+				acUsage()
+				1
+			})
+			.executes {
+				acUsage()
+				1
+			}
 
 	private fun registerLeapCounter(name: String) {
 		dispatcher.register(
@@ -267,11 +358,122 @@ object CgcCommandRegistry {
 	}
 
 	private fun usage() {
-		info("Commands: ${CgcSettings.commandPrefix.value}lc.")
+		info("Commands: ${CgcSettings.commandPrefix.value}lc, ${CgcSettings.commandPrefix.value}ac.")
 	}
 
 	private fun lcUsage() {
 		info("LC: use ${CgcSettings.commandPrefix.value}lc add p3 3 A M B T H or ${CgcSettings.commandPrefix.value}lc remove.")
+	}
+
+	private fun acUsage() {
+		info("AC: use /ac add <${AutoCNodeType.commandNames().joinToString("|")}>, /ac remove, /ac undo, or /ac edit.")
+		info("AC args: strafe <W|A|S|D>, interact <true|false>, crouch <seconds>, command <command>, leap <class>, record <seconds>, break <true|false> <seconds>.")
+		info("AC modifiers: AS, nr, h<number>, R(number), wait(number), maxA(number). Stop nodes can use n<node>, for example ncrouch.")
+	}
+
+	private fun suggestAcArgs(nodeRaw: String, builder: SuggestionsBuilder): CompletableFuture<Suggestions> {
+		val remaining = builder.remaining
+		val tokenStart = remaining.indexAfterLastWhitespace()
+		val previousTokens = remaining
+			.substring(0, tokenStart)
+			.trim()
+			.split(Regex("\\s+"))
+			.filter { it.isNotBlank() }
+		val tokenBuilder = builder.createOffset(builder.start + tokenStart)
+		return SharedSuggestionProvider.suggest(acArgSuggestionsFor(nodeRaw, previousTokens), tokenBuilder)
+	}
+
+	private fun acArgSuggestionsFor(nodeRaw: String, previousTokens: List<String>): List<String> {
+		val type = AutoCNodeType.byName(nodeRaw)
+		val base = when (type) {
+			AutoCNodeType.STRAFE -> if (previousTokens.any { it.equalsAny("W", "A", "S", "D") }) emptyList() else listOf("W", "A", "S", "D")
+			AutoCNodeType.INTERACT -> if (previousTokens.any { it.equalsAny("true", "false") }) emptyList() else listOf("true", "false")
+			AutoCNodeType.LEAP -> if (previousTokens.any { it.isClassArg() }) emptyList() else listOf("A", "Archer", "M", "Mage", "B", "Berserk", "T", "Tank", "H", "Healer")
+			AutoCNodeType.BREAK -> when {
+				previousTokens.isEmpty() -> listOf("true", "false")
+				previousTokens.first().equalsAny("true", "false") && previousTokens.size == 1 -> listOf("1", "2", "3", "5")
+				else -> emptyList()
+			}
+			AutoCNodeType.RECORD -> if (previousTokens.any { it.toDoubleOrNull() != null }) emptyList() else listOf("1", "2", "3", "5")
+			AutoCNodeType.CROUCH -> if (previousTokens.any { it.toDoubleOrNull() != null }) emptyList() else listOf("0", "0.25", "0.5", "1")
+			AutoCNodeType.STOP -> AutoCNodeType.commandNames()
+				.asSequence()
+				.filter { !it.equals("stop", ignoreCase = true) }
+				.map { "n$it" }
+				.filter { suggestion -> previousTokens.none { it.equals(suggestion, ignoreCase = true) } }
+				.toList()
+			AutoCNodeType.COMMAND -> listOf("pc", "warp")
+			else -> emptyList()
+		}
+		return base + AC_COMMON_ARG_SUGGESTIONS
+	}
+
+	private fun String.equalsAny(vararg values: String): Boolean =
+		values.any { equals(it, ignoreCase = true) }
+
+	private fun String.isClassArg(): Boolean =
+		equalsAny("A", "Archer", "M", "Mage", "B", "Berserk", "T", "Tank", "H", "Healer")
+
+	private fun String.indexAfterLastWhitespace(): Int {
+		val index = indexOfLast { it.isWhitespace() }
+		return if (index == -1) 0 else index + 1
+	}
+
+	private fun addAcNode(nodeRaw: String, args: String): Int {
+		val module = autoC() ?: return 0
+		val type = AutoCNodeType.byName(nodeRaw)
+		if (type == null) {
+			error("Invalid AC node type. Use: ${AutoCNodeType.commandNames().joinToString(", ")}.")
+			return 0
+		}
+
+		val node = module.addNode(type, args)
+		if (node == null) {
+			error("Failed to add AC ${type.commandName} node. Usage: ${type.usage}.")
+			return 0
+		}
+
+		info("AC: added ${node.name()} node at ${node.pos.toChatString()}.")
+		return 1
+	}
+
+	private fun removeAcNode(): Int {
+		val module = autoC() ?: return 0
+		val removed = module.removeNearest()
+		if (removed == null) {
+			error("AC: no nodes to remove.")
+			return 0
+		}
+
+		info("AC: removed ${removed.name()} node.")
+		return 1
+	}
+
+	private fun undoAcNode(): Int {
+		val module = autoC() ?: return 0
+		val removed = module.undo()
+		if (removed == null) {
+			error("AC: no nodes to undo.")
+			return 0
+		}
+
+		info("AC: undid ${removed.name()} node.")
+		return 1
+	}
+
+	private fun editAcNodes(): Int {
+		val module = autoC() ?: return 0
+		val session = module.createEditSession() ?: return 0
+		CgcClient.openScreenLater { AutoCEditScreen(session) }
+		return 1
+	}
+
+	private fun autoC(): AutoC? {
+		val module = CgcModules.manager.get("AutoC") as? AutoC
+		if (module == null) {
+			error("Auto C is not registered.")
+		}
+		return module
 	}
 
 	private fun normalize(raw: String): String =

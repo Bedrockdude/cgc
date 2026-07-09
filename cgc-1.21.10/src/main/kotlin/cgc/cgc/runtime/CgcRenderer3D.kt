@@ -16,6 +16,8 @@ import kotlin.math.sin
 object CgcRenderer3D {
 	private val lineTasks = arrayListOf<BoxTask>()
 	private val circleTasks = arrayListOf<CircleTask>()
+	private val ringTasks = arrayListOf<RingTask>()
+	private val lineListTasks = arrayListOf<LineListTask>()
 	private val filledTasks = arrayListOf<BoxTask>()
 	private val circleCache = hashMapOf<Int, CircleData>()
 
@@ -39,8 +41,22 @@ object CgcRenderer3D {
 		circleTasks.add(CircleTask(pos, depth, radius, colour, slices))
 	}
 
+	fun ring(pos: Vec3, depth: Boolean, radius: Float, colour: Colour, slices: Int = 64, layers: Int = 16) {
+		if (radius <= 0.0f || slices < 3 || layers < 1) {
+			return
+		}
+		ringTasks.add(RingTask(pos, depth, radius, colour, slices, layers))
+	}
+
+	fun lineList(points: List<Vec3>, start: Colour, end: Colour, depth: Boolean) {
+		if (points.size < 2) {
+			return
+		}
+		lineListTasks.add(LineListTask(points.toList(), start, end, depth))
+	}
+
 	fun render(context: LevelRenderContext) {
-		if (lineTasks.isEmpty() && circleTasks.isEmpty() && filledTasks.isEmpty()) {
+		if (lineTasks.isEmpty() && circleTasks.isEmpty() && ringTasks.isEmpty() && lineListTasks.isEmpty() && filledTasks.isEmpty()) {
 			return
 		}
 
@@ -51,7 +67,7 @@ object CgcRenderer3D {
 		stack.pushPose()
 		stack.translate(-camera.x, -camera.y, -camera.z)
 
-		renderLines(source, stack)
+		renderLines(source, stack, camera)
 		renderFilled(source, stack)
 
 		stack.popPose()
@@ -61,18 +77,22 @@ object CgcRenderer3D {
 	fun clear() {
 		lineTasks.clear()
 		circleTasks.clear()
+		ringTasks.clear()
+		lineListTasks.clear()
 		filledTasks.clear()
 	}
 
-	private fun renderLines(source: MultiBufferSource.BufferSource, stack: PoseStack) {
-		renderLineBatch(source, stack, RenderTypes.secondaryBlockOutline(), depth = true)
-		renderLineBatch(source, stack, RenderTypes.linesTranslucent(), depth = false)
+	private fun renderLines(source: MultiBufferSource.BufferSource, stack: PoseStack, camera: Vec3) {
+		renderLineBatch(source, stack, RenderTypes.secondaryBlockOutline(), depth = true, camera = camera)
+		renderLineBatch(source, stack, RenderTypes.linesTranslucent(), depth = false, camera = camera)
 	}
 
-	private fun renderLineBatch(source: MultiBufferSource.BufferSource, stack: PoseStack, type: RenderType, depth: Boolean) {
+	private fun renderLineBatch(source: MultiBufferSource.BufferSource, stack: PoseStack, type: RenderType, depth: Boolean, camera: Vec3) {
 		val boxes = lineTasks.filter { it.depth == depth }
 		val circles = circleTasks.filter { it.depth == depth }
-		if (boxes.isEmpty() && circles.isEmpty()) {
+		val rings = ringTasks.filter { it.depth == depth }
+		val lineLists = lineListTasks.filter { it.depth == depth }
+		if (boxes.isEmpty() && circles.isEmpty() && rings.isEmpty() && lineLists.isEmpty()) {
 			return
 		}
 
@@ -82,6 +102,12 @@ object CgcRenderer3D {
 		}
 		for (task in circles) {
 			renderCircle(stack.last(), buffer, task)
+		}
+		for (task in rings) {
+			renderRing(stack.last(), buffer, task, camera)
+		}
+		for (task in lineLists) {
+			renderLineList(stack.last(), buffer, task)
 		}
 		source.endBatch(type)
 	}
@@ -209,8 +235,124 @@ object CgcRenderer3D {
 		}
 	}
 
+	private fun renderRing(pose: PoseStack.Pose, buffer: VertexConsumer, task: RingTask, camera: Vec3) {
+		val factor = ringFactor(camera.distanceToSqr(task.pos))
+		if (factor == 0) {
+			return
+		}
+
+		val slices = task.slices / factor
+		val layers = task.layers / factor
+		if (slices < 3 || layers < 1) {
+			return
+		}
+
+		val data = circleCache.getOrPut(slices) { CircleData(slices) }
+		val height = task.radius * 2.0f / 3.0f
+		val oneOverLayers = 1.0f / layers
+		val red = task.colour.red / 255.0f
+		val green = task.colour.green / 255.0f
+		val blue = task.colour.blue / 255.0f
+
+		for (i in 0 until layers) {
+			val yOffset = height * i / layers
+			val t = 1.0f - i * oneOverLayers
+			val alpha = t * t * t
+			if (alpha >= 0.01f) {
+				renderRingLayer(pose, buffer, task.pos, task.radius, yOffset, red, green, blue, alpha, data, slices)
+			}
+		}
+	}
+
+	private fun renderRingLayer(
+		pose: PoseStack.Pose,
+		buffer: VertexConsumer,
+		pos: Vec3,
+		radius: Float,
+		yOffset: Float,
+		red: Float,
+		green: Float,
+		blue: Float,
+		alpha: Float,
+		data: CircleData,
+		slices: Int
+	) {
+		val matrix = pose.pose()
+		val y = pos.y.toFloat() + yOffset
+		for (i in 0 until slices) {
+			val next = (i + 1) % slices
+			val x1 = pos.x.toFloat() + data.x[i] * radius
+			val z1 = pos.z.toFloat() + data.z[i] * radius
+			val x2 = pos.x.toFloat() + data.x[next] * radius
+			val z2 = pos.z.toFloat() + data.z[next] * radius
+			val nx = data.nx[i]
+			val nz = data.nz[i]
+
+			buffer.addVertex(matrix, x1, y, z1)
+				.setColor(red, green, blue, alpha)
+				.setNormal(nx, 0.0f, nz)
+				.setLineWidth(LINE_WIDTH)
+			buffer.addVertex(matrix, x2, y, z2)
+				.setColor(red, green, blue, alpha)
+				.setNormal(nx, 0.0f, nz)
+				.setLineWidth(LINE_WIDTH)
+		}
+	}
+
+	private fun renderLineList(pose: PoseStack.Pose, buffer: VertexConsumer, task: LineListTask) {
+		val size = task.points.size - 1
+		val start = task.start.argb()
+		val end = task.end.argb()
+
+		for (i in 0 until size) {
+			val from = task.points[i]
+			val to = task.points[i + 1]
+			val dx = (to.x - from.x).toFloat()
+			val dy = (to.y - from.y).toFloat()
+			val dz = (to.z - from.z).toFloat()
+			val t0 = i.toFloat() / size
+			val t1 = (i + 1).toFloat() / size
+
+			buffer.addVertex(pose, from.x.toFloat(), from.y.toFloat(), from.z.toFloat())
+				.setColor(lerpArgb(start, end, t0))
+				.setNormal(pose, dx, dy, dz)
+				.setLineWidth(LINE_WIDTH)
+			buffer.addVertex(pose, to.x.toFloat(), to.y.toFloat(), to.z.toFloat())
+				.setColor(lerpArgb(start, end, t1))
+				.setNormal(pose, dx, dy, dz)
+				.setLineWidth(LINE_WIDTH)
+		}
+	}
+
+	private fun lerpArgb(start: Int, end: Int, t: Float): Int {
+		val a0 = start ushr 24 and 0xFF
+		val r0 = start ushr 16 and 0xFF
+		val g0 = start ushr 8 and 0xFF
+		val b0 = start and 0xFF
+		val a1 = end ushr 24 and 0xFF
+		val r1 = end ushr 16 and 0xFF
+		val g1 = end ushr 8 and 0xFF
+		val b1 = end and 0xFF
+		val alpha = (a0 + (a1 - a0) * t).toInt()
+		val red = (r0 + (r1 - r0) * t).toInt()
+		val green = (g0 + (g1 - g0) * t).toInt()
+		val blue = (b0 + (b1 - b0) * t).toInt()
+		return (alpha shl 24) or (red shl 16) or (green shl 8) or blue
+	}
+
+	private fun ringFactor(distanceSq: Double): Int =
+		when {
+			distanceSq > 4096.0 -> 0
+			distanceSq > 2304.0 -> 8
+			distanceSq > 1024.0 -> 4
+			distanceSq > 256.0 -> 2
+			else -> 1
+		}
+
 	private data class BoxTask(val aabb: AABB, val colour: Colour, val depth: Boolean)
 	private data class CircleTask(val pos: Vec3, val depth: Boolean, val radius: Float, val colour: Colour, val slices: Int)
+	private data class RingTask(val pos: Vec3, val depth: Boolean, val radius: Float, val colour: Colour, val slices: Int, val layers: Int)
+	private data class LineListTask(val points: List<Vec3>, val start: Colour, val end: Colour, val depth: Boolean)
 
 	private class CircleData(slices: Int) {
 		val x = FloatArray(slices)

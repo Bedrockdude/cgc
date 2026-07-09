@@ -1,7 +1,9 @@
 package cgc.cgc.module
 
 import cgc.cgc.dungeon.DungeonState
+import cgc.cgc.dungeon.room.DungeonRoomScanner
 import cgc.cgc.terminal.TerminalContext
+import cgc.cgc.module.impl.dungeon.AutoC
 import cgc.cgc.module.impl.dungeon.AutoSSSpecsafe
 import cgc.cgc.module.impl.dungeon.AutoLeap
 import cgc.cgc.module.impl.dungeon.AutoTerms
@@ -9,6 +11,7 @@ import cgc.cgc.module.impl.dungeon.BreakerAura
 import cgc.cgc.module.impl.dungeon.DungeonBreaker
 import cgc.cgc.module.impl.dungeon.FastLeap
 import cgc.cgc.module.impl.dungeon.LeapCounter
+import cgc.cgc.module.impl.dungeon.Relics
 import cgc.cgc.module.impl.dungeon.SSTriggerBot
 import cgc.cgc.module.impl.dungeon.TerminalSolver
 import cgc.cgc.module.impl.dungeon.TriggerBot
@@ -22,7 +25,9 @@ import cgc.cgc.module.impl.player.HotbarSwitcher
 import cgc.cgc.module.impl.player.MaskHelper
 import cgc.cgc.module.impl.render.CgcClickGuiModule
 import cgc.cgc.module.impl.render.EnderPearlTrajectory
+import cgc.cgc.module.impl.render.Trail
 import cgc.cgc.module.impl.render.opsec.OpSec
+import cgc.cgc.module.impl.utils.FreezeState
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.runtime.CgcRuntime
 import cgc.cgc.location.Location
@@ -46,17 +51,21 @@ object CgcModules {
 			CgcClickGuiModule(),
 			Ether(),
 			VelocityBuffer(),
+			FreezeState(),
 			DungeonBreaker(),
 			BreakerAura(),
 			LeapCounter(),
 			FastLeap(),
+			AutoC(),
 			AutoLeap(),
+			Relics(),
 			AutoTerms(),
 			TerminalSolver(),
 			AutoSSSpecsafe(),
 			SSTriggerBot(),
 			TriggerBot(),
 			EnderPearlTrajectory(),
+			Trail(),
 			OpSec(),
 			CapitalLetterCommands(),
 			InventoryButtons(),
@@ -67,9 +76,18 @@ object CgcModules {
 		)
 	}
 
-	fun clientTick(client: Minecraft) {
+	fun clientTickStart(client: Minecraft) {
 		CgcRuntime.clientTickStart(client)
+		manager.all()
+			.asSequence()
+			.filter { it.enabled }
+			.filterIsInstance<ClientTickStartModule>()
+			.forEach { it.onClientTickStart(client) }
+	}
+
+	fun clientTick(client: Minecraft) {
 		DungeonState.tick(client)
+		DungeonRoomScanner.tick(client)
 		pollKeybinds(client)
 
 		manager.all()
@@ -84,6 +102,7 @@ object CgcModules {
 		CgcRuntime.worldLoad()
 		Location.reset()
 		DungeonState.reset()
+		DungeonRoomScanner.reset()
 		TerminalContext.reset()
 		manager.all()
 			.asSequence()

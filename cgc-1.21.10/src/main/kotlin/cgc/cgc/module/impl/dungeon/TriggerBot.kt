@@ -211,7 +211,7 @@ class TriggerBot : CgcModule(
 			if (queuedFrameId != lookedFrame.getId()) {
 				queuedFrameId = lookedFrame.getId()
 				queuedFrameIndex = frameIndex
-				queuedClicks = clicksNeeded(rotations[frameIndex], targetRotation(solution, frameIndex, holdoutIndex))
+				queuedClicks = clicksNeededForFrame(rotations[frameIndex], solution[frameIndex], frameIndex == holdoutIndex)
 				nextClickAt = 0L
 			}
 			if (queuedFrameIndex != frameIndex || queuedClicks <= 0) {
@@ -274,34 +274,17 @@ class TriggerBot : CgcModule(
 			}
 
 		private fun bottomLeftActiveIndex(solution: List<Int>, rotations: List<Int>): Int =
-			solution.indices
-				.filter { solution[it] != EMPTY_ROTATION && rotations[it] != EMPTY_ROTATION }
-				.minWithOrNull(
-					compareBy<Int> { holdoutPriorityScore(it) }
-						.thenBy { frameRow(it) }
-						.thenBy { visualColumnFromLeft(it) }
-				)
-				?: -1
+			HOLDOUT_PRIORITY.firstOrNull { index ->
+				solution[index] != EMPTY_ROTATION && rotations[index] != EMPTY_ROTATION
+			} ?: -1
 
-		private fun holdoutPriorityScore(index: Int): Int =
-			visualColumnFromLeft(index) * HOLDOUT_COLUMN_WEIGHT + frameRow(index)
-
-		private fun frameRow(index: Int): Int =
-			index % GRID_SIZE
-
-		private fun frameColumn(index: Int): Int =
-			index / GRID_SIZE
-
-		private fun visualColumnFromLeft(index: Int): Int =
-			GRID_SIZE - 1 - frameColumn(index)
-
-		private fun targetRotation(solution: List<Int>, index: Int, holdoutIndex: Int): Int {
-			val solvedRotation = solution[index]
-			return if (index == holdoutIndex) {
-				(solvedRotation + FRAME_ROTATIONS - 1) % FRAME_ROTATIONS
-			} else {
-				solvedRotation
+		private fun clicksNeededForFrame(currentRotation: Int, solvedRotation: Int, isHoldout: Boolean): Int {
+			if (!isHoldout) {
+				return clicksNeeded(currentRotation, solvedRotation)
 			}
+
+			val oneClickFromSolved = (solvedRotation + FRAME_ROTATIONS - 1) % FRAME_ROTATIONS
+			return clicksNeeded(currentRotation, oneClickFromSolved)
 		}
 
 		private fun clicksNeeded(currentRotation: Int, targetRotation: Int): Int =
@@ -347,10 +330,10 @@ class TriggerBot : CgcModule(
 			private const val GRID_SIZE = 5
 			private const val FRAME_ROTATIONS = 8
 			private const val EMPTY_ROTATION = -1
-			private const val HOLDOUT_COLUMN_WEIGHT = 2
 			private const val RECENT_ROTATION_KEEP_MS = 1000L
 			private const val ALIGN_RAYCAST_DISTANCE = 5.0
 			private const val ALIGN_FRAME_PICK_INFLATE = 0.12
+			private val HOLDOUT_PRIORITY = buildHoldoutPriority()
 			private val POSSIBLE_SOLUTIONS = listOf(
 				listOf(7, 7, -1, -1, -1, 1, -1, -1, -1, -1, 1, 3, 3, 3, 3, -1, -1, -1, -1, 1, -1, -1, -1, 7, 1),
 				listOf(-1, -1, 7, 7, 5, -1, 7, 1, -1, 5, -1, -1, -1, -1, -1, -1, 7, 5, -1, 1, -1, -1, 7, 7, 1),
@@ -362,6 +345,27 @@ class TriggerBot : CgcModule(
 				listOf(-1, -1, -1, -1, -1, 1, 3, 3, 3, 3, -1, -1, -1, -1, 1, 7, 7, 7, 7, 1, -1, -1, -1, -1, -1),
 				listOf(-1, -1, -1, -1, -1, -1, 1, -1, 1, -1, 7, 1, 7, 1, 3, 1, -1, 1, -1, 1, -1, -1, -1, -1, -1)
 			)
+
+			private fun buildHoldoutPriority(): List<Int> {
+				val priority = arrayListOf<Int>()
+				priority.add(frameIndexFromVisual(0, 0))
+				priority.add(frameIndexFromVisual(0, 1))
+				for (column in 1 until GRID_SIZE) {
+					priority.add(frameIndexFromVisual(column, 0))
+				}
+				for (row in 1 until GRID_SIZE) {
+					val startColumn = if (row == 1) 1 else 0
+					for (column in startColumn until GRID_SIZE) {
+						priority.add(frameIndexFromVisual(column, row))
+					}
+				}
+				return priority
+			}
+
+			private fun frameIndexFromVisual(columnFromLeft: Int, rowFromBottom: Int): Int {
+				val zOffset = GRID_SIZE - 1 - columnFromLeft
+				return rowFromBottom + zOffset * GRID_SIZE
+			}
 		}
 	}
 }

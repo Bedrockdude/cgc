@@ -168,7 +168,6 @@ class CapitalLetterCommands : CgcModule(
 		private var instance: CapitalLetterCommands? = null
 
 		private val DIRECT_TEXT_COMMANDS = setOf(
-			"ac",
 			"achat",
 			"allchat",
 			"gc",
@@ -186,7 +185,7 @@ class CapitalLetterCommands : CgcModule(
 		private val PLAYER_TEXT_COMMANDS = setOf("msg", "m", "tell", "t", "w", "whisper", "pm", "message")
 		private val GROUP_COMMANDS = setOf("p", "party", "g", "guild")
 		private val GROUP_TEXT_SUBCOMMANDS = setOf("c", "chat")
-		private val SUBCOMMAND_ROOTS = setOf("cgc", "coop", "is", "island", "lc", "leapcounter", "sb", "skyblock")
+		private val SUBCOMMAND_ROOTS = setOf("ac", "cgc", "coop", "is", "island", "lc", "leapcounter", "sb", "skyblock")
 		private val KNOWN_SUBCOMMANDS = setOf(
 			"accept",
 			"add",
@@ -212,6 +211,7 @@ class CapitalLetterCommands : CgcModule(
 			"settings",
 			"toggle",
 			"transfer",
+			"undo",
 			"unmute",
 			"warp"
 		)

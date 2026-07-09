@@ -7,6 +7,7 @@ import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
@@ -35,6 +36,11 @@ public class ClientPacketListenerMixin {
 		} else {
 			CgcModules.chatMessage(packet.content().getString());
 		}
+	}
+
+	@Inject(method = "setActionBarText", at = @At("HEAD"))
+	private void cgc$onSetActionBarText(ClientboundSetActionBarTextPacket packet, CallbackInfo ci) {
+		CgcModules.actionBarMessage(packet.text().getString());
 	}
 
 	@Inject(method = "handleAddObjective", at = @At("HEAD"))

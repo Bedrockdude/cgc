@@ -25,6 +25,10 @@ object CgcClient : ClientModInitializer {
 		CgcConfigStore.loadAll()
 		Runtime.getRuntime().addShutdownHook(Thread { CgcConfigStore.saveAll() })
 
+		ClientTickEvents.START_CLIENT_TICK.register { client ->
+			CgcModules.clientTickStart(client)
+		}
+
 		ClientTickEvents.END_CLIENT_TICK.register { client ->
 			CgcModules.clientTick(client)
 
@@ -69,7 +73,7 @@ object CgcClient : ClientModInitializer {
 		}
 	}
 
-	private fun openScreenLater(factory: () -> Screen) {
+	fun openScreenLater(factory: () -> Screen) {
 		pendingScreenDelayTicks = 2
 		pendingScreen = factory
 	}
