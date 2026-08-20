@@ -5,16 +5,15 @@ import cgc.cgc.module.CgcModule
 import cgc.cgc.module.ModuleCategory
 import cgc.cgc.module.WorldRenderExtractModule
 import cgc.cgc.module.setting.BooleanSetting
+import cgc.cgc.runtime.CgcRenderer3D
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
 import net.minecraft.client.multiplayer.ClientLevel
 import net.minecraft.client.player.LocalPlayer
-import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.world.item.Items
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
-import kotlin.math.sqrt
 
 class EnderPearlTrajectory : CgcModule(
 	id = "EnderPearlTrajectory",
@@ -40,7 +39,7 @@ class EnderPearlTrajectory : CgcModule(
 		val tickDelta = client.deltaTracker.getGameTimeDeltaPartialTick(false)
 		val points = calculatePearlTrajectory(level, player, tickDelta)
 		if (points.size > 1) {
-			renderLineStrip(context, points, TRAJECTORY_COLOR)
+			CgcRenderer3D.lineList(points, TRAJECTORY_COLOR, TRAJECTORY_COLOR, depth = true)
 		}
 	}
 
@@ -88,36 +87,6 @@ class EnderPearlTrajectory : CgcModule(
 			return Vec3(RIGHT_SIDE_OFFSET, 0.0, 0.0)
 		}
 		return crossed.normalize().scale(RIGHT_SIDE_OFFSET)
-	}
-
-	private fun renderLineStrip(context: LevelRenderContext, points: List<Vec3>, color: Colour) {
-		val camera = Minecraft.getInstance().gameRenderer.mainCamera.position()
-		val matrices = context.poseStack()
-		val buffer = context.bufferSource().getBuffer(RenderTypes.lines())
-		matrices.pushPose()
-		matrices.translate(-camera.x, -camera.y, -camera.z)
-
-		for (i in 0 until points.lastIndex) {
-			val a = points[i]
-			val b = points[i + 1]
-			val normal = b.subtract(a).normalForLine()
-			buffer.addVertex(matrices.last(), a.x.toFloat(), a.y.toFloat(), a.z.toFloat())
-				.setColor(color.red, color.green, color.blue, color.alpha)
-				.setNormal(matrices.last(), normal.x.toFloat(), normal.y.toFloat(), normal.z.toFloat())
-			buffer.addVertex(matrices.last(), b.x.toFloat(), b.y.toFloat(), b.z.toFloat())
-				.setColor(color.red, color.green, color.blue, color.alpha)
-				.setNormal(matrices.last(), normal.x.toFloat(), normal.y.toFloat(), normal.z.toFloat())
-		}
-
-		matrices.popPose()
-	}
-
-	private fun Vec3.normalForLine(): Vec3 {
-		val length = sqrt(lengthSqr())
-		if (length < 1.0E-6) {
-			return UP
-		}
-		return Vec3(x / length, y / length, z / length)
 	}
 
 	private companion object {

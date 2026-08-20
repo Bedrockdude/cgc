@@ -11,13 +11,13 @@ interface AutoCNodeContext {
 
 	fun smoothLookAtBlock(yaw: Float, pitch: Float, block: BlockPos)
 
-	fun startWalk(yaw: Float, pitch: Float)
+	fun startWalk(yaw: Float, pitch: Float, activeForSeconds: Double = 0.0)
 
-	fun startStrafe(direction: AutoCStrafeDirection)
+	fun startStrafe(direction: AutoCStrafeDirection, activeForSeconds: Double = 0.0)
 
 	fun warp(yaw: Float, pitch: Float)
 
-	fun etherwarp(yaw: Float, pitch: Float, block: BlockPos)
+	fun etherwarp(yaw: Float, pitch: Float, block: BlockPos, target: Vec3)
 
 	fun interact(yaw: Float, pitch: Float, block: BlockPos, hit: Vec3, await: Boolean)
 

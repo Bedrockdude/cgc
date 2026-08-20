@@ -1,5 +1,6 @@
 package cgc.cgc.client.gui
 
+import cgc.cgc.data.Phase7
 import cgc.cgc.module.impl.dungeon.AutoC
 import cgc.cgc.module.impl.dungeon.autoc.AutoCNode
 import cgc.cgc.module.impl.dungeon.autoc.AutoCNodeAdapter
@@ -33,6 +34,7 @@ class AutoCEditScreen(
 	private var focusedText = ""
 	private var pickMenu: PickMenu? = null
 	private var activationReqMenuId: String? = null
+	private var phaseStartMenuId: String? = null
 	private var panelScroll = 0.0
 	private var panelContentHeight = 0
 	private var orbitYaw = 35.0
@@ -264,6 +266,7 @@ class AutoCEditScreen(
 		y = renderToggle(gfx, x, y, "On Terminal Exit", node.onTerminalExit) {
 			node.onTerminalExit = !node.onTerminalExit
 		}
+		y = renderPhaseStartCondition(gfx, x, y, node)
 		y = renderActivationRequirements(gfx, x, y, node)
 
 		panelContentHeight = y + panelScroll.roundToInt()
@@ -412,6 +415,57 @@ class AutoCEditScreen(
 		return y
 	}
 
+	private fun renderPhaseStartCondition(gfx: GuiGraphicsExtractor, panelX: Int, yStart: Int, node: AutoCNode): Int {
+		var y = yStart
+		val x = panelX + PANEL_PADDING
+		val width = PANEL_WIDTH - PANEL_PADDING * 2
+		val phase = node.onPhaseStart
+		if (phase != Phase7.UNKNOWN) {
+			val label = "On Phase Start: ${phaseLabel(phase)}"
+			gfx.fill(x, y, x + width, y + BUTTON_HEIGHT, TOGGLE_ACTIVE)
+			outline(gfx, x, y, width, BUTTON_HEIGHT, SELECTED_OUTLINE)
+			gfx.text(font(), fit(label, width - 48), x + 6, y + 5, TEXT, false)
+			button(gfx, x + width - 38, y + 2, 34, BUTTON_HEIGHT - 4, "X") { button ->
+				if (button == 0) {
+					node.onPhaseStart = Phase7.UNKNOWN
+					phaseStartMenuId = null
+				}
+			}
+			y += BUTTON_HEIGHT + 4
+		}
+
+		button(gfx, x, y, width, BUTTON_HEIGHT, "Add Phase Start") { button ->
+			if (button == 0) {
+				phaseStartMenuId = if (phaseStartMenuId == node.id) null else node.id
+			}
+		}
+		y += BUTTON_HEIGHT + 5
+
+		if (phaseStartMenuId == node.id) {
+			y = renderPhaseStartMenu(gfx, panelX, y, node)
+		}
+		return y
+	}
+
+	private fun renderPhaseStartMenu(gfx: GuiGraphicsExtractor, panelX: Int, yStart: Int, node: AutoCNode): Int {
+		var y = yStart
+		val x = panelX + PANEL_PADDING
+		val width = PANEL_WIDTH - PANEL_PADDING * 2
+		for (phase in PHASE_START_CHOICES) {
+			gfx.fill(x, y, x + width, y + BUTTON_HEIGHT, PICK_PANEL)
+			outline(gfx, x, y, width, BUTTON_HEIGHT, OUTLINE)
+			gfx.text(font(), phaseLabel(phase), x + 6, y + 5, TEXT, false)
+			hitboxes.add(UiHitbox(x, y, width, BUTTON_HEIGHT) { button ->
+				if (button == 0) {
+					node.onPhaseStart = phase
+					phaseStartMenuId = null
+				}
+			})
+			y += BUTTON_HEIGHT + 4
+		}
+		return y
+	}
+
 	private fun renderActivationRequirement(gfx: GuiGraphicsExtractor, panelX: Int, y: Int, node: AutoCNode, requiredId: String): Int {
 		val x = panelX + PANEL_PADDING
 		val width = PANEL_WIDTH - PANEL_PADDING * 2
@@ -511,6 +565,7 @@ class AutoCEditScreen(
 			confirmDeleteId = null
 			focusedField = null
 			activationReqMenuId = null
+			phaseStartMenuId = null
 		}
 		selectedId = id
 	}
@@ -774,6 +829,9 @@ class AutoCEditScreen(
 		return font.plainSubstrByWidth(text, maxWidth - font.width("...")) + "..."
 	}
 
+	private fun phaseLabel(phase: Phase7): String =
+		if (phase == Phase7.P5) "p5" else phase.name.lowercase()
+
 	private fun font(): Font = Minecraft.getInstance().font
 
 	private data class UiHitbox(
@@ -842,7 +900,18 @@ class AutoCEditScreen(
 			"notStart",
 			"maxA",
 			"onTerminalExit",
+			"onPhaseStart",
 			"requires"
+		)
+		private val PHASE_START_CHOICES = listOf(
+			Phase7.P1,
+			Phase7.P2,
+			Phase7.S1,
+			Phase7.S2,
+			Phase7.S3,
+			Phase7.S4,
+			Phase7.P4,
+			Phase7.P5
 		)
 		private const val PANEL_WIDTH = 238
 		private const val PANEL_PADDING = 10

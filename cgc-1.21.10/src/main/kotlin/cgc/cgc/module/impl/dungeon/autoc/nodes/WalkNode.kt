@@ -11,10 +11,11 @@ class WalkNode(
 	pos: Pos = Pos(),
 	private val yaw: Float = 0.0f,
 	private val pitch: Float = 0.0f,
+	var activeForSeconds: Double = 0.0,
 	radius: Float = AutoCNode.DEFAULT_RADIUS
 ) : AutoCNode(pos, radius) {
 	override fun run(player: LocalPlayer, playerPos: Pos, context: AutoCNodeContext): Boolean {
-		context.startWalk(yaw, pitch)
+		context.startWalk(yaw, pitch, activeForSeconds)
 		return true
 	}
 
@@ -31,6 +32,7 @@ class WalkNode(
 		val json = super.serialize()
 		json.addProperty("yaw", yaw)
 		json.addProperty("pitch", pitch)
+		json.addProperty("activeFor", activeForSeconds)
 		return json
 	}
 

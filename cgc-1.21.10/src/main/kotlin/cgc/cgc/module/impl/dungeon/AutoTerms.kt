@@ -6,9 +6,9 @@ import cgc.cgc.location.Location
 import cgc.cgc.module.CgcModule
 import cgc.cgc.module.ClientTickModule
 import cgc.cgc.module.ModuleCategory
-import cgc.cgc.module.PacketReceiveModule
 import cgc.cgc.module.PacketSendModule
 import cgc.cgc.module.WorldLoadModule
+import cgc.cgc.module.WorldRenderStartModule
 import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.MultiBoolSetting
@@ -16,6 +16,7 @@ import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.terminal.TerminalContext
 import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.game.ClientboundContainerClosePacket
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket
@@ -29,6 +30,7 @@ import net.minecraft.world.inventory.Slot
 import net.minecraft.world.item.Item
 import net.minecraft.world.item.Items
 import java.util.Locale
+import java.util.concurrent.ThreadLocalRandom
 import java.util.regex.Pattern
 
 class AutoTerms : CgcModule(
@@ -37,7 +39,7 @@ class AutoTerms : CgcModule(
 	category = ModuleCategory.DUNGEONS,
 	description = "Automatically clicks known F7 terminal solutions.",
 	defaultEnabled = false
-), ClientTickModule, PacketReceiveModule, PacketSendModule, WorldLoadModule {
+), ClientTickModule, WorldRenderStartModule, PacketSendModule, WorldLoadModule {
 	private val skyblock = ModeSetting("Skyblock", "Auto", listOf("Auto", "Dungeon", "Skyblock", "Practice"))
 	private val terminals = MultiBoolSetting(
 		"Terminals",
@@ -46,6 +48,24 @@ class AutoTerms : CgcModule(
 	)
 	private val firstClickDelay = NumberSetting("First Click Delay", 0.0, 400.0, 100.0, 5.0, " ms")
 	private val delay = NumberSetting("Delay", 0.0, 250.0, 150.0, 5.0, " ms")
+	private val randomizationMinimum = NumberSetting(
+		"Randomization Minimum",
+		0.0,
+		100.0,
+		0.0,
+		1.0,
+		" ms",
+		onEdit = this::onRandomizationMinimumEdited
+	)
+	private val randomizationMaximum = NumberSetting(
+		"Randomization Maximum",
+		0.0,
+		100.0,
+		0.0,
+		1.0,
+		" ms",
+		onEdit = this::onRandomizationMaximumEdited
+	)
 	private val breakThreshold = NumberSetting("Break Threshold", 200.0, 800.0, 500.0, 10.0, " ms")
 	private val melodySkip = BooleanSetting("Melody Skip", true)
 
@@ -53,6 +73,7 @@ class AutoTerms : CgcModule(
 	private var firstClick = true
 	private var openedAtMs = 0L
 	private var lastClickTime = 0L
+	private var nextClickRandomizationMs = 0L
 	private var session: TerminalSession? = null
 	private var terminalContainer: AbstractContainerMenu? = null
 	private val clickedSlots = hashSetOf<Int>()
@@ -61,11 +82,23 @@ class AutoTerms : CgcModule(
 	private val melodyQueue = ArrayDeque<SolutionClick>()
 	private var melodyState: MelodyState? = null
 	private var lastMelodyClickState: MelodyState? = null
+	private var pendingAutoClick: PendingAutoClick? = null
+	private var suppressTerminalOpenUntilMs = 0L
 	private var skippedFirstMelodyOpportunity = false
+	private var skippedFirstMelodyState: MelodyState? = null
 
 	init {
 		instance = this
-		registerProperty(skyblock, terminals, firstClickDelay, delay, breakThreshold, melodySkip)
+		registerProperty(
+			skyblock,
+			terminals,
+			firstClickDelay,
+			delay,
+			randomizationMinimum,
+			randomizationMaximum,
+			breakThreshold,
+			melodySkip
+		)
 	}
 
 	override fun onClientTick(client: Minecraft) {
@@ -79,17 +112,36 @@ class AutoTerms : CgcModule(
 		}
 
 		val now = System.currentTimeMillis()
+		recoverStaleAutoClick(now, current)
 		if (current.type == TerminalType.MELODY) {
 			tickMelody(now)
-			return
 		}
+	}
 
-		if (!canClickNow(now)) {
+	override fun onWorldRenderStart() {
+		val current = session ?: return
+		if (current.type == TerminalType.MELODY || terminalContainer == null) {
 			return
 		}
-		if (!firstClick && now - lastClickTime > breakThreshold.value.toLong()) {
+		if (!hasTerminalScreenOpen()) {
+			close()
+			return
+		}
+		tickStandardTerminal(System.currentTimeMillis(), current)
+	}
+
+	private fun tickStandardTerminal(now: Long, current: TerminalSession) {
+		if (clickedWindow) {
+			if (now - lastClickTime <= breakThreshold.value.toLong()) {
+				return
+			}
+			// The server did not return an inventory update. Re-solve from the latest
+			// authoritative state instead of remaining permanently stalled.
 			clickedWindow = false
 			clickedSlots.clear()
+		}
+		if (!canClickNow(now, current.type)) {
+			return
 		}
 		if (!isInTerm() || TerminalSolver.blockAll) {
 			return
@@ -101,26 +153,29 @@ class AutoTerms : CgcModule(
 		}
 
 		if (sendWindowClick(selectNextClick(current, solution))) {
-			markClicked(now)
+			markClicked(now, current.type)
 			clickedWindow = true
 		}
 	}
 
-	override fun onPacketReceive(packet: Packet<*>): Boolean {
-		handleTerminalPacket(packet)
-		return false
-	}
-
-	fun handleTerminalPacket(packet: Packet<*>) {
-		when (packet) {
+	fun handleTerminalPacket(packet: Packet<*>): Boolean {
+		return when (packet) {
 			is ClientboundOpenScreenPacket -> handleOpenScreen(packet)
-			is ClientboundContainerSetSlotPacket -> handleSetSlot(packet)
-			is ClientboundContainerSetContentPacket -> handleSetContent(packet)
+			is ClientboundContainerSetSlotPacket -> {
+				handleSetSlot(packet)
+				false
+			}
+			is ClientboundContainerSetContentPacket -> {
+				handleSetContent(packet)
+				false
+			}
 			is ClientboundContainerClosePacket -> {
 				if (packet.containerId == terminalContainer?.containerId) {
 					close()
 				}
+				false
 			}
+			else -> false
 		}
 	}
 
@@ -131,6 +186,7 @@ class AutoTerms : CgcModule(
 
 	fun handleTerminalSend(packet: Packet<*>) {
 		if (packet is ServerboundContainerClosePacket && isInTerm()) {
+			armManualCloseSuppression()
 			close()
 		}
 	}
@@ -179,41 +235,69 @@ class AutoTerms : CgcModule(
 			return false
 		}
 
+		val gameMode = Minecraft.getInstance().gameMode ?: return false
+		gameMode.handleContainerInput(menu.containerId, click.index, click.button, click.type, player)
 		if (current.type != TerminalType.RUBIX && current.type != TerminalType.MELODY) {
 			clickedSlots.add(click.index)
 		}
-
-		Minecraft.getInstance().gameMode?.handleContainerInput(menu.containerId, click.index, click.button, click.type, player)
-			?: return false
+		if (current.type == TerminalType.MELODY) {
+			pendingAutoClick = PendingAutoClick(System.currentTimeMillis(), current.type, melodyState)
+		}
 		return true
 	}
 
-	private fun handleOpenScreen(packet: ClientboundOpenScreenPacket) {
-		val player = Minecraft.getInstance().player ?: return
+	private fun handleOpenScreen(packet: ClientboundOpenScreenPacket): Boolean {
+		val player = Minecraft.getInstance().player ?: return false
 		if (packet.containerId !in 1..100 || !passesSkyblockMode() || !isTerminalMenu(packet.type)) {
 			if (isInTerm()) {
 				close()
 			}
-			return
+			return false
 		}
 
 		val type = TerminalType.fromTitle(packet.title.string, looseTerminalDetection()) ?: run {
 			if (isInTerm()) {
 				close()
 			}
-			return
+			return false
 		}
+		if (isManualCloseSuppressed()) {
+			close()
+			return true
+		}
+
+		val previous = session
+		val isServerRefresh = previous != null
+			&& previous.type == type
+			&& previous.title == packet.title.string
+		val now = System.currentTimeMillis()
+
 		terminalContainer = packet.type.create(packet.containerId, player.inventory)
 		session = TerminalSession(type, packet.containerId, packet.title.string)
+		suppressTerminalOpenUntilMs = 0L
 		clickedWindow = false
-		firstClick = true
-		openedAtMs = System.currentTimeMillis()
-		lastClickTime = 0L
 		clickedSlots.clear()
-		lastHumanClickSlot = type.slotCount / 2
-		panelPathStartsLeft = System.nanoTime() % 2L == 0L
-		clearMelody()
+		pendingAutoClick = null
+		if (isServerRefresh) {
+			// Hypixel can replace the menu after accepting a click. This is the same
+			// terminal action stream, so retain first-click state and the random value
+			// already chosen for the next action.
+			if (firstClick) {
+				openedAtMs = now
+			} else {
+				lastClickTime = now
+			}
+		} else {
+			firstClick = true
+			openedAtMs = now
+			lastClickTime = 0L
+			nextClickRandomizationMs = randomizationFor(type)
+			lastHumanClickSlot = type.slotCount / 2
+			panelPathStartsLeft = System.nanoTime() % 2L == 0L
+			clearMelody()
+		}
 		TerminalContext.open()
+		return false
 	}
 
 	private fun handleSetSlot(packet: ClientboundContainerSetSlotPacket) {
@@ -232,8 +316,10 @@ class AutoTerms : CgcModule(
 		}
 		if (current.type == TerminalType.MELODY) {
 			loadMelodySlot(packet)
+			pendingAutoClick = null
+		} else {
+			clickedSlots.remove(packet.slot)
 		}
-		clickedWindow = false
 	}
 
 	private fun handleSetContent(packet: ClientboundContainerSetContentPacket) {
@@ -249,7 +335,8 @@ class AutoTerms : CgcModule(
 			}
 		}
 		current.loaded = true
-		clickedWindow = false
+		clickedSlots.clear()
+		pendingAutoClick = null
 	}
 
 	private fun loadMelodySlot(packet: ClientboundContainerSetSlotPacket) {
@@ -276,6 +363,9 @@ class AutoTerms : CgcModule(
 			if (state != melodyState) {
 				melodyQueue.clear()
 				lastMelodyClickState = null
+				if (skippedFirstMelodyState != null && state != skippedFirstMelodyState) {
+					skippedFirstMelodyState = null
+				}
 			}
 			melodyState = state
 		}
@@ -290,12 +380,12 @@ class AutoTerms : CgcModule(
 			queueMelodyClicks()
 		}
 
-		if (melodyQueue.isEmpty() || !canClickNow(now)) {
+		if (melodyQueue.isEmpty() || !canClickNow(now, TerminalType.MELODY)) {
 			return
 		}
 
 		if (sendWindowClick(melodyQueue.removeFirst())) {
-			markClicked(now)
+			markClicked(now, TerminalType.MELODY)
 		}
 	}
 
@@ -312,12 +402,13 @@ class AutoTerms : CgcModule(
 
 		val shouldWaitForFirstRow = melodySkip.value
 			&& firstClick
-			&& !skippedFirstMelodyOpportunity
 			&& state.buttonRow == 0
 			&& state.currentColumn == 0
+			&& state.correctColumn == 0
+			&& (!skippedFirstMelodyOpportunity || skippedFirstMelodyState == state)
 		if (shouldWaitForFirstRow) {
 			skippedFirstMelodyOpportunity = true
-			lastMelodyClickState = state
+			skippedFirstMelodyState = state
 			return
 		}
 
@@ -325,16 +416,45 @@ class AutoTerms : CgcModule(
 		lastMelodyClickState = state
 	}
 
-	private fun canClickNow(now: Long): Boolean =
+	private fun canClickNow(now: Long, type: TerminalType): Boolean =
 		if (firstClick) {
-			now - openedAtMs >= currentFirstDelayMs()
+			now - openedAtMs >= currentFirstDelayMs() + randomizationForCurrentAction(type)
 		} else {
-			now - lastClickTime >= currentClickDelayMs()
+			now - lastClickTime >= currentClickDelayMs() + randomizationForCurrentAction(type)
 		}
 
-	private fun markClicked(now: Long) {
+	private fun markClicked(now: Long, type: TerminalType) {
 		lastClickTime = now
 		firstClick = false
+		nextClickRandomizationMs = randomizationFor(type)
+	}
+
+	private fun randomizationForCurrentAction(type: TerminalType): Long =
+		if (type == TerminalType.MELODY) 0L else nextClickRandomizationMs
+
+	private fun randomizationFor(type: TerminalType): Long {
+		if (type == TerminalType.MELODY) {
+			return 0L
+		}
+		val minimum = randomizationMinimum.value.toLong()
+		val maximum = randomizationMaximum.value.toLong()
+		return if (minimum == maximum) {
+			minimum
+		} else {
+			ThreadLocalRandom.current().nextLong(minimum, maximum + 1L)
+		}
+	}
+
+	private fun onRandomizationMinimumEdited() {
+		if (randomizationMinimum.value > randomizationMaximum.value) {
+			randomizationMaximum.setValue(randomizationMinimum.value.toDouble())
+		}
+	}
+
+	private fun onRandomizationMaximumEdited() {
+		if (randomizationMaximum.value < randomizationMinimum.value) {
+			randomizationMinimum.setValue(randomizationMaximum.value.toDouble())
+		}
 	}
 
 	private fun currentFirstDelayMs(): Long =
@@ -342,6 +462,42 @@ class AutoTerms : CgcModule(
 
 	private fun currentClickDelayMs(): Long =
 		if (TerminalSolver.active) TerminalSolver.clickDelayMs else delay.value.toLong()
+
+	private fun recoverStaleAutoClick(now: Long, current: TerminalSession) {
+		if (current.type != TerminalType.MELODY) {
+			pendingAutoClick = null
+			return
+		}
+		val pending = pendingAutoClick ?: return
+		if (pending.type != current.type || now - pending.sentAtMs < staleAutoClickMs()) {
+			return
+		}
+
+		if (pending.melodyState == null || pending.melodyState == lastMelodyClickState) {
+			lastMelodyClickState = null
+		}
+		melodyQueue.clear()
+		clickedWindow = false
+		pendingAutoClick = null
+	}
+
+	private fun staleAutoClickMs(): Long =
+		maxOf(breakThreshold.value.toLong(), currentClickDelayMs() + STALE_CLICK_GRACE_MS)
+
+	private fun armManualCloseSuppression() {
+		suppressTerminalOpenUntilMs = System.currentTimeMillis() + MANUAL_CLOSE_SUPPRESS_MS
+	}
+
+	private fun isManualCloseSuppressed(): Boolean {
+		if (suppressTerminalOpenUntilMs == 0L) {
+			return false
+		}
+		if (System.currentTimeMillis() > suppressTerminalOpenUntilMs) {
+			suppressTerminalOpenUntilMs = 0L
+			return false
+		}
+		return true
+	}
 
 	private fun solve(current: TerminalSession): List<SolutionClick> {
 		if (!current.loaded || !isEnabled(current.type)) {
@@ -527,8 +683,10 @@ class AutoTerms : CgcModule(
 		firstClick = true
 		openedAtMs = 0L
 		lastClickTime = 0L
+		nextClickRandomizationMs = 0L
 		clickedSlots.clear()
 		lastHumanClickSlot = null
+		pendingAutoClick = null
 		clearMelody()
 		TerminalContext.close()
 	}
@@ -536,7 +694,8 @@ class AutoTerms : CgcModule(
 	private fun hasTerminalScreenOpen(): Boolean {
 		val client = Minecraft.getInstance()
 		val menu = terminalContainer ?: return false
-		return client.screen != null && client.player?.containerMenu?.containerId == menu.containerId
+		val screen = client.screen as? AbstractContainerScreen<*> ?: return false
+		return screen.menu.containerId == menu.containerId && client.player?.containerMenu?.containerId == menu.containerId
 	}
 
 	private fun clearMelody() {
@@ -544,6 +703,7 @@ class AutoTerms : CgcModule(
 		melodyState = null
 		lastMelodyClickState = null
 		skippedFirstMelodyOpportunity = false
+		skippedFirstMelodyState = null
 	}
 
 	private fun isTerminalMenu(type: MenuType<*>): Boolean =
@@ -607,6 +767,12 @@ class AutoTerms : CgcModule(
 		val correctColumn: Int
 	)
 
+	private data class PendingAutoClick(
+		val sentAtMs: Long,
+		val type: TerminalType,
+		val melodyState: MelodyState?
+	)
+
 	data class TerminalOverlay(
 		val windowId: Int,
 		val typeKey: String,
@@ -641,6 +807,8 @@ class AutoTerms : CgcModule(
 	companion object {
 		private var instance: AutoTerms? = null
 		private const val HUMAN_NEIGHBOR_RADIUS_SQUARED = 400
+		private const val STALE_CLICK_GRACE_MS = 50L
+		private const val MANUAL_CLOSE_SUPPRESS_MS = 750L
 		private val COLORS_PATTERN = Pattern.compile("Select all the (.+) items!")
 		private val STARTS_WITH_PATTERN = Pattern.compile("What starts with: '(\\w+)'\\?")
 		private val COLOR_REPLACEMENTS = linkedMapOf(
@@ -671,10 +839,15 @@ class AutoTerms : CgcModule(
 			instance?.takeIf { it.enabled || TerminalSolver.active }?.overlay()
 
 		@JvmStatic
-		fun handlePacketForTerminalSolver(packet: Packet<*>) {
+		fun handleAppliedTerminalPacket(packet: Packet<*>) {
 			val terms = instance ?: return
-			if (!terms.enabled) {
-				terms.handleTerminalPacket(packet)
+			if (!terms.enabled && !TerminalSolver.active) {
+				return
+			}
+			if (terms.handleTerminalPacket(packet) && packet is ClientboundOpenScreenPacket) {
+				// Manual-close suppression is decided after vanilla applies the packet so
+				// terminal state is never mutated from Netty's decode thread.
+				Minecraft.getInstance().player?.closeContainer()
 			}
 		}
 

@@ -66,7 +66,12 @@ object Location {
 
 	@JvmStatic
 	fun noteDungeonBossChat(message: String) {
-		if (message.startsWith("[BOSS] Goldor:")) {
+		if (message.startsWith("[BOSS] Maxor:")
+			|| message.startsWith("[BOSS] Storm:")
+			|| message.startsWith("[BOSS] Goldor:")
+			|| message.startsWith("[BOSS] Necron:")
+			|| message.startsWith("[BOSS] Wither King:")
+		) {
 			inSkyblock = true
 			setArea(Island.DUNGEON)
 			if (floor == Floor.NONE) {

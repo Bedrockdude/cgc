@@ -31,7 +31,29 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 object CgcCommandRegistry {
-	private val AC_COMMON_ARG_SUGGESTIONS = listOf("AS", "nr", "h1", "h2", "h3", "h4", "R(0.5)", "R(1)", "R(2)", "wait(0.5)", "wait(1)", "maxA(1)", "maxA(3)")
+	private val AC_COMMON_ARG_SUGGESTIONS = listOf(
+		"AS",
+		"nr",
+		"h1",
+		"h2",
+		"h3",
+		"h4",
+		"R(0.5)",
+		"R(1)",
+		"R(2)",
+		"wait(0.5)",
+		"wait(1)",
+		"maxA(1)",
+		"maxA(3)",
+		"phaseStart(p1)",
+		"phaseStart(p2)",
+		"phaseStart(s1)",
+		"phaseStart(s2)",
+		"phaseStart(s3)",
+		"phaseStart(s4)",
+		"phaseStart(p4)",
+		"phaseStart(p5)"
+	)
 	private val dispatcher = CommandDispatcher<ClientSuggestionProvider>()
 	private val phaseSuggestions = suggestions("p1", "p2", "p3", "p4", "5p")
 	private val classSuggestions = suggestions("A", "M", "B", "T", "H", "A M B T H")
@@ -368,7 +390,8 @@ object CgcCommandRegistry {
 	private fun acUsage() {
 		info("AC: use /ac add <${AutoCNodeType.commandNames().joinToString("|")}>, /ac remove, /ac undo, or /ac edit.")
 		info("AC args: strafe <W|A|S|D>, interact <true|false>, crouch <seconds>, command <command>, leap <class>, record <seconds>, break <true|false> <seconds>.")
-		info("AC modifiers: AS, nr, h<number>, R(number), wait(number), maxA(number). Stop nodes can use n<node>, for example ncrouch.")
+		info("AC modifiers: AS, nr, h<number>, R(number), wait(number), maxA(number), phaseStart(p1|p2|s1|s2|s3|s4|p4|p5). Walk/strafe can use activeFor(number).")
+		info("AC stop nodes can use n<node>, for example ncrouch.")
 	}
 
 	private fun suggestAcArgs(nodeRaw: String, builder: SuggestionsBuilder): CompletableFuture<Suggestions> {
@@ -386,7 +409,11 @@ object CgcCommandRegistry {
 	private fun acArgSuggestionsFor(nodeRaw: String, previousTokens: List<String>): List<String> {
 		val type = AutoCNodeType.byName(nodeRaw)
 		val base = when (type) {
-			AutoCNodeType.STRAFE -> if (previousTokens.any { it.equalsAny("W", "A", "S", "D") }) emptyList() else listOf("W", "A", "S", "D")
+			AutoCNodeType.WALK -> listOf("activeFor(0.5)", "activeFor(1)", "activeFor(2)")
+			AutoCNodeType.STRAFE -> {
+				val direction = if (previousTokens.any { it.equalsAny("W", "A", "S", "D") }) emptyList() else listOf("W", "A", "S", "D")
+				direction + listOf("activeFor(0.5)", "activeFor(1)", "activeFor(2)")
+			}
 			AutoCNodeType.INTERACT -> if (previousTokens.any { it.equalsAny("true", "false") }) emptyList() else listOf("true", "false")
 			AutoCNodeType.LEAP -> if (previousTokens.any { it.isClassArg() }) emptyList() else listOf("A", "Archer", "M", "Mage", "B", "Berserk", "T", "Tank", "H", "Healer")
 			AutoCNodeType.BREAK -> when {

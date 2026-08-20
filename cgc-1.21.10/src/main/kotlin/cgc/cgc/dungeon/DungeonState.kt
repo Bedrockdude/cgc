@@ -2,6 +2,7 @@ package cgc.cgc.dungeon
 
 import cgc.cgc.data.DungeonClass
 import cgc.cgc.data.DungeonPlayer
+import cgc.cgc.data.Phase7
 import cgc.cgc.location.Floor
 import cgc.cgc.location.Island
 import cgc.cgc.location.Location
@@ -17,7 +18,10 @@ import java.util.regex.Pattern
 
 object DungeonState {
 	private val tabListPattern = Pattern.compile("^\\[(?<sbLevel>\\d+)] (?:\\[?\\w+] )*(?<name>\\w+) .*?\\((?<class>\\w+)(?: (?<classLevel>\\w+))*\\)$")
+	private val terminalPhasePattern = Pattern.compile("^(.*?) (?:activated|completed) a (terminal|device|lever)! \\((\\d+)/(\\d+)\\)")
 	private val players = linkedSetOf<DungeonPlayer>()
+	private var inP3: Boolean = false
+	private var p3SectionIndex: Int = -1
 
 	@JvmStatic
 	var started: Boolean = false
@@ -28,9 +32,31 @@ object DungeonState {
 		private set
 
 	@JvmStatic
+	var f7Phase: Phase7 = Phase7.UNKNOWN
+		private set
+
+	@JvmStatic
+	var p3Section: Phase7 = Phase7.UNKNOWN
+		private set
+
+	@JvmStatic
+	var lastF7PhaseStart: Phase7 = Phase7.UNKNOWN
+		private set
+
+	@JvmStatic
+	var lastF7PhaseStartSequence: Long = 0L
+		private set
+
+	@JvmStatic
 	fun reset() {
 		started = false
 		inBoss = false
+		inP3 = false
+		p3SectionIndex = -1
+		f7Phase = Phase7.UNKNOWN
+		p3Section = Phase7.UNKNOWN
+		lastF7PhaseStart = Phase7.UNKNOWN
+		lastF7PhaseStartSequence = 0L
 		players.clear()
 	}
 
@@ -58,6 +84,8 @@ object DungeonState {
 		if (text.startsWith("[BOSS]")) {
 			inBoss = Location.area.isArea(Island.DUNGEON)
 		}
+
+		handleF7PhaseChat(text)
 	}
 
 	@JvmStatic
@@ -135,6 +163,95 @@ object DungeonState {
 			Floor.F5, Floor.M5, Floor.F6, Floor.M6 -> pos.x > -40.0 && pos.z > -8.0
 			Floor.F7, Floor.M7 -> DungeonUtils.isPositionInF7Boss(pos)
 			else -> false
+		}
+
+	private fun handleF7PhaseChat(text: String) {
+		if (!Location.area.isArea(Island.DUNGEON) || !(Location.floor == Floor.F7 || Location.floor == Floor.M7)) {
+			return
+		}
+
+		when (text) {
+			"[BOSS] Maxor: WELL! WELL! WELL! LOOK WHO'S HERE!" -> {
+				inP3 = false
+				p3SectionIndex = -1
+				p3Section = Phase7.UNKNOWN
+				noteF7PhaseStart(Phase7.P1)
+				return
+			}
+			"[BOSS] Maxor: I'M TOO YOUNG TO DIE AGAIN!" -> {
+				inP3 = false
+				p3SectionIndex = -1
+				p3Section = Phase7.UNKNOWN
+				noteF7PhaseStart(Phase7.P2)
+				return
+			}
+			"[BOSS] Goldor: Who dares trespass into my domain?" -> {
+				f7Phase = Phase7.P3
+				inP3 = true
+				p3SectionIndex = 0
+				p3Section = Phase7.S1
+				noteF7PhaseStart(Phase7.S1)
+				return
+			}
+			"The Core entrance is opening!" -> {
+				inP3 = false
+				return
+			}
+			"[BOSS] Necron: I'm afraid, your journey ends now." -> {
+				inP3 = false
+				p3SectionIndex = -1
+				p3Section = Phase7.UNKNOWN
+				noteF7PhaseStart(Phase7.P4)
+				return
+			}
+			"[BOSS] Wither King: I no longer wish to fight, but I know that will not stop you." -> {
+				inP3 = false
+				p3SectionIndex = -1
+				p3Section = Phase7.UNKNOWN
+				noteF7PhaseStart(Phase7.P5)
+				return
+			}
+		}
+
+		if (!inP3) {
+			return
+		}
+
+		val matcher = terminalPhasePattern.matcher(text)
+		if (!matcher.find()) {
+			return
+		}
+		val completed = matcher.group(3).toIntOrNull() ?: return
+		val total = matcher.group(4).toIntOrNull() ?: return
+		if (completed != total) {
+			return
+		}
+
+		val nextIndex = p3SectionIndex + 1
+		val nextSection = p3SectionFromIndex(nextIndex)
+		if (nextSection != p3Section) {
+			p3SectionIndex = nextIndex
+			p3Section = nextSection
+			noteF7PhaseStart(nextSection)
+		}
+	}
+
+	private fun noteF7PhaseStart(phase: Phase7) {
+		f7Phase = when (phase) {
+			Phase7.S1, Phase7.S2, Phase7.S3, Phase7.S4 -> Phase7.P3
+			else -> phase
+		}
+		lastF7PhaseStart = phase
+		lastF7PhaseStartSequence++
+	}
+
+	private fun p3SectionFromIndex(index: Int): Phase7 =
+		when (index) {
+			0 -> Phase7.S1
+			1 -> Phase7.S2
+			2 -> Phase7.S3
+			3 -> Phase7.S4
+			else -> Phase7.S4
 		}
 
 	private fun findLevelPlayer(level: ClientLevel, name: String): Player? =

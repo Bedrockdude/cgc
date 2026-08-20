@@ -21,6 +21,10 @@ class AutoCLookController {
 		start(player, yaw, pitch, nowMs, FAST_PROFILE)
 	}
 
+	fun startEtherwarp(player: LocalPlayer, yaw: Float, pitch: Float, nowMs: Long = nowMs()) {
+		start(player, yaw, pitch, nowMs, ETHERWARP_PROFILE)
+	}
+
 	private fun start(player: LocalPlayer, yaw: Float, pitch: Float, nowMs: Long, profile: LookProfile) {
 		val start = LookRotation(player.yRot, player.xRot.coerceIn(MIN_PITCH, MAX_PITCH))
 		val target = LookRotation(yaw, pitch.coerceIn(MIN_PITCH, MAX_PITCH))
@@ -44,7 +48,8 @@ class AutoCLookController {
 			startedAtMs = nowMs,
 			durationMs = durationFor(distance, random, profile),
 			curveYaw = curve.yaw,
-			curvePitch = curve.pitch
+			curvePitch = curve.pitch,
+			profile = profile
 		)
 	}
 
@@ -58,7 +63,7 @@ class AutoCLookController {
 		}
 
 		val rawProgress = (elapsed.toDouble() / max(1L, active.durationMs)).coerceIn(0.0, 1.0)
-		val progress = humanProgress(rawProgress, active.distance)
+		val progress = humanProgress(rawProgress, active.distance, active.profile)
 		val curveEnvelope = curveEnvelope(rawProgress)
 		setRotation(
 			player,
@@ -89,14 +94,15 @@ class AutoCLookController {
 		return (base + variance).toLong().coerceIn(profile.minDurationMs.toLong(), profile.maxDurationMs.toLong())
 	}
 
-	private fun humanProgress(rawProgress: Double, distance: Double): Double {
+	private fun humanProgress(rawProgress: Double, distance: Double, profile: LookProfile): Double {
 		val progress = rawProgress.coerceIn(0.0, 1.0)
 		val distanceFactor = ((distance - SMALL_DISTANCE) / (LARGE_DISTANCE - SMALL_DISTANCE)).coerceIn(0.0, 1.0)
 		val smooth = smootherStep(progress)
-		val fast = easeOutPower(progress, 1.18 + distanceFactor * 0.22)
-		val fastBlend = (0.18 + distanceFactor * 0.22).coerceIn(0.18, 0.40)
+		val fast = easeOutPower(progress, profile.easeOutPowerBase + distanceFactor * profile.easeOutPowerScale)
+		val fastBlend = (profile.fastBlendMin + distanceFactor * (profile.fastBlendMax - profile.fastBlendMin))
+			.coerceIn(profile.fastBlendMin, profile.fastBlendMax)
 		val shaped = lerp(smooth, fast, fastBlend)
-		val maxEarlyLead = progress * (1.18 + distanceFactor * 0.30) + INITIAL_LEAD_ALLOWANCE
+		val maxEarlyLead = progress * (profile.earlyLeadBase + distanceFactor * profile.earlyLeadScale) + INITIAL_LEAD_ALLOWANCE
 		return if (progress < EARLY_LEAD_LIMIT_UNTIL) {
 			min(shaped, maxEarlyLead)
 		} else {
@@ -155,7 +161,8 @@ class AutoCLookController {
 		val startedAtMs: Long,
 		val durationMs: Long,
 		val curveYaw: Double,
-		val curvePitch: Double
+		val curvePitch: Double,
+		val profile: LookProfile
 	)
 
 	private data class LookCurve(val yaw: Double, val pitch: Double)
@@ -166,7 +173,13 @@ class AutoCLookController {
 		val maxDurationMs: Double,
 		val msPerDegree: Double,
 		val largeTurnExtraMs: Double,
-		val durationVarianceMs: Double
+		val durationVarianceMs: Double,
+		val fastBlendMin: Double,
+		val fastBlendMax: Double,
+		val easeOutPowerBase: Double,
+		val easeOutPowerScale: Double,
+		val earlyLeadBase: Double,
+		val earlyLeadScale: Double
 	)
 
 	private companion object {
@@ -186,6 +199,12 @@ class AutoCLookController {
 		private const val FAST_MS_PER_DEGREE = 0.55
 		private const val FAST_LARGE_TURN_EXTRA_MS = 9.0
 		private const val FAST_DURATION_VARIANCE_MS = 3.0
+		private const val ETHERWARP_DIRECT_APPLY_DISTANCE = 0.02
+		private const val ETHERWARP_MIN_DURATION_MS = 50.0
+		private const val ETHERWARP_MAX_DURATION_MS = 230.0
+		private const val ETHERWARP_MS_PER_DEGREE = 1.52
+		private const val ETHERWARP_LARGE_TURN_EXTRA_MS = 36.0
+		private const val ETHERWARP_DURATION_VARIANCE_MS = 4.0
 		private const val INITIAL_LEAD_ALLOWANCE = 0.012
 		private const val EARLY_LEAD_LIMIT_UNTIL = 0.44
 		private const val MIN_CURVE_FRACTION = 0.004
@@ -199,7 +218,13 @@ class AutoCLookController {
 			maxDurationMs = MAX_DURATION_MS,
 			msPerDegree = MS_PER_DEGREE,
 			largeTurnExtraMs = LARGE_TURN_EXTRA_MS,
-			durationVarianceMs = DURATION_VARIANCE_MS
+			durationVarianceMs = DURATION_VARIANCE_MS,
+			fastBlendMin = 0.18,
+			fastBlendMax = 0.40,
+			easeOutPowerBase = 1.18,
+			easeOutPowerScale = 0.22,
+			earlyLeadBase = 1.18,
+			earlyLeadScale = 0.30
 		)
 		private val FAST_PROFILE = LookProfile(
 			directApplyDistance = FAST_DIRECT_APPLY_DISTANCE,
@@ -207,7 +232,27 @@ class AutoCLookController {
 			maxDurationMs = FAST_MAX_DURATION_MS,
 			msPerDegree = FAST_MS_PER_DEGREE,
 			largeTurnExtraMs = FAST_LARGE_TURN_EXTRA_MS,
-			durationVarianceMs = FAST_DURATION_VARIANCE_MS
+			durationVarianceMs = FAST_DURATION_VARIANCE_MS,
+			fastBlendMin = 0.18,
+			fastBlendMax = 0.40,
+			easeOutPowerBase = 1.18,
+			easeOutPowerScale = 0.22,
+			earlyLeadBase = 1.18,
+			earlyLeadScale = 0.30
+		)
+		private val ETHERWARP_PROFILE = LookProfile(
+			directApplyDistance = ETHERWARP_DIRECT_APPLY_DISTANCE,
+			minDurationMs = ETHERWARP_MIN_DURATION_MS,
+			maxDurationMs = ETHERWARP_MAX_DURATION_MS,
+			msPerDegree = ETHERWARP_MS_PER_DEGREE,
+			largeTurnExtraMs = ETHERWARP_LARGE_TURN_EXTRA_MS,
+			durationVarianceMs = ETHERWARP_DURATION_VARIANCE_MS,
+			fastBlendMin = 0.08,
+			fastBlendMax = 0.54,
+			easeOutPowerBase = 1.08,
+			easeOutPowerScale = 0.66,
+			earlyLeadBase = 1.08,
+			earlyLeadScale = 0.42
 		)
 	}
 }

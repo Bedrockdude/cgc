@@ -20,7 +20,7 @@ class EtherwarpNode(
 	radius: Float = AutoCNode.DEFAULT_RADIUS
 ) : AutoCNode(pos, radius) {
 	override fun run(player: LocalPlayer, playerPos: Pos, context: AutoCNodeContext): Boolean {
-		context.etherwarp(yaw, pitch, block.asBlockPos())
+		context.etherwarp(yaw, pitch, block.asBlockPos(), target.asVec3())
 		return true
 	}
 

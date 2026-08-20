@@ -1,6 +1,7 @@
 package cgc.cgc.module.impl.dungeon.autoc
 
 import cgc.cgc.data.Colour
+import cgc.cgc.data.Phase7
 import cgc.cgc.data.Pos
 import cgc.cgc.runtime.CgcRenderer3D
 import com.google.gson.JsonArray
@@ -22,6 +23,7 @@ abstract class AutoCNode(
 	var id: String = UUID.randomUUID().toString()
 	var maxActivationsPerMinute: Int = 0
 	var onTerminalExit: Boolean = false
+	var onPhaseStart: Phase7 = Phase7.UNKNOWN
 	val requiredNodeIds: MutableSet<String> = linkedSetOf()
 
 	@Transient
@@ -127,6 +129,9 @@ abstract class AutoCNode(
 		}
 		if (onTerminalExit) {
 			json.addProperty("onTerminalExit", true)
+		}
+		if (onPhaseStart != Phase7.UNKNOWN) {
+			json.addProperty("onPhaseStart", onPhaseStart.name.lowercase())
 		}
 		if (requiredNodeIds.isNotEmpty()) {
 			val conditions = JsonArray()

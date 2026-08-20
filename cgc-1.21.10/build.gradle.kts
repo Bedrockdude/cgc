@@ -26,6 +26,7 @@ dependencies {
 	// Fabric API. This is technically optional, but you probably want it anyway.
 	implementation("net.fabricmc.fabric-api:fabric-api:${providers.gradleProperty("fabric_api_version").get()}")
 	implementation("net.fabricmc:fabric-language-kotlin:${providers.gradleProperty("fabric_kotlin_version").get()}")
+	testImplementation(kotlin("test"))
 
 	// Development-only authentication for Gradle run configs.
 	runtimeOnly("me.djtheredstoner:DevAuth-fabric:${providers.gradleProperty("devauth_version").get()}")
@@ -36,6 +37,10 @@ tasks.named<JavaExec>("runClient") {
 		"-Ddevauth.enabled=true",
 		"-Ddevauth.account=main"
 	)
+}
+
+tasks.test {
+	useJUnitPlatform()
 }
 
 tasks.processResources {

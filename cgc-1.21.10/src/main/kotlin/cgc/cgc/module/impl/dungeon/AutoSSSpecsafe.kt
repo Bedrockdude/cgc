@@ -13,6 +13,8 @@ import cgc.cgc.module.ChatMessageModule
 import cgc.cgc.module.ClientTickModule
 import cgc.cgc.module.HudRenderModule
 import cgc.cgc.module.ModuleCategory
+import cgc.cgc.module.PacketReceiveModule
+import cgc.cgc.module.PacketSendModule
 import cgc.cgc.module.WorldLoadModule
 import cgc.cgc.module.WorldRenderExtractModule
 import cgc.cgc.module.WorldRenderStartModule
@@ -22,6 +24,7 @@ import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.runtime.CgcRenderPrimitives
 import cgc.cgc.utils.DungeonUtils
+import cgc.cgc.mixin.MinecraftAccessor
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
@@ -30,9 +33,15 @@ import net.minecraft.client.player.LocalPlayer
 import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
-import net.minecraft.world.InteractionHand
+import net.minecraft.network.protocol.Packet
+import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket
+import net.minecraft.network.protocol.game.ClientboundBundlePacket
+import net.minecraft.network.protocol.game.ClientboundSetTimePacket
+import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket
+import net.minecraft.util.Mth
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.block.Blocks
+import net.minecraft.world.level.block.ButtonBlock
 import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.phys.AABB
 import net.minecraft.world.phys.BlockHitResult
@@ -50,7 +59,7 @@ class AutoSSSpecsafe : CgcModule(
 	category = ModuleCategory.DUNGEONS,
 	description = "Automatically solves spectator safe Simon Says.",
 	defaultEnabled = false
-), ClientTickModule, WorldRenderStartModule, WorldRenderExtractModule, HudRenderModule, WorldLoadModule, ChatMessageModule, ActionBarMessageModule, BlockChangeModule {
+), ClientTickModule, WorldRenderStartModule, WorldRenderExtractModule, HudRenderModule, WorldLoadModule, ChatMessageModule, ActionBarMessageModule, BlockChangeModule, PacketSendModule, PacketReceiveModule {
 	private val resetKey = KeybindSetting("Reset Key", Keybind(action = this::SSR))
 	private val autoStart = BooleanSetting("Auto start", true)
 	private val autoRestartSs = BooleanSetting("Auto restart ss", false)
@@ -67,9 +76,11 @@ class AutoSSSpecsafe : CgcModule(
 	private val clicks = arrayListOf<BlockPos>()
 	private val allButtons = arrayListOf<Vec3>()
 	private val practiceButtons = arrayListOf<BlockPos>()
+	private val patternCapture = SimonSaysPatternCapture(FINAL_SEQUENCE_LENGTH)
 	private val aimController = SimonSaysAimController()
+	private val mouseMotion = VanillaMouseMotion()
 
-	private var lastClickTime = System.currentTimeMillis()
+	private var lastClickTime = nowMs()
 	private var currentClickDelayMs = randomClickDelayMs()
 	private var state = 0
 	private var doneFirst = false
@@ -103,6 +114,15 @@ class AutoSSSpecsafe : CgcModule(
 	private var autoRestartAt = 0L
 	private var previousGridButton: BlockPos? = null
 	private var previousGridMotion: GridMotion? = null
+	private var latestAimResult: AimUpdateResult? = null
+	private var pendingClick: PendingClick? = null
+	private var clickPacketCaptureTarget: BlockPos? = null
+	private var capturedClickPacketSequence: Int? = null
+	private var smoothedInteractionAckMs = 0L
+	private var lastServerGameTime: Long? = null
+	private var lastServerTimePacketAtMs = 0L
+	private var estimatedServerTickMs: Double? = null
+	private var nextServerSafeClickAtMs = 0L
 
 	init {
 		registerProperty(
@@ -128,9 +148,25 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
-		val now = System.currentTimeMillis()
+		val now = nowMs()
 		if (tickAutoRestart(now)) {
 			return
+		}
+		// The vanilla acknowledgement is emitted after the server processes the
+		// interaction sequence. Aim may continue, but never queue another SS click
+		// ahead of that acknowledgement.
+		val pending = pendingClick
+		if (pending != null) {
+			if (now - pending.sentAtMs >= pendingClickTimeoutMs()) {
+				stopSimonSaysSafely("Auto SS stopped: the previous click was never acknowledged.")
+			}
+			return
+		}
+		if (startClicksRemaining <= 0) {
+			commitCapturedPatternIfReady(client, now)
+			if (!doingSS) {
+				return
+			}
 		}
 
 		if (targetButton != null && (targetPreAim || targetWaitingForButton) && shouldYieldPreAim(client)) {
@@ -186,12 +222,6 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
-		if (!doneFirst && clicks.size == 3) {
-			clicks.removeAt(0)
-			allButtons.removeAt(0)
-		}
-
-		doneFirst = true
 		if (state >= clicks.size) {
 			beginWaitingPractice(client)
 			return
@@ -216,7 +246,7 @@ class AutoSSSpecsafe : CgcModule(
 			if (button != null && (targetPreAim || targetWaitingForButton) && isCurrentSolveButtonAlreadyAimed(client, button)) {
 				return
 			}
-			updateAimRotation(client)
+			latestAimResult = updateAimRotation(client)
 		}
 	}
 
@@ -227,13 +257,13 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		val clicked = clickedButton
-		if (clicked != null && System.currentTimeMillis() - lastClickTime <= currentClickDelayMs) {
+		if (clicked != null && nowMs() - lastClickTime <= currentClickDelayMs) {
 			renderButton(context, client.level!!, BlockPos.containing(clicked), fillColor.value, outlineColor.value)
 		}
 	}
 
 	override fun onHudRender(gfx: GuiGraphicsExtractor) {
-		if (!donePopup.value || System.currentTimeMillis() > donePopupUntil) {
+		if (!donePopup.value || nowMs() > donePopupUntil) {
 			return
 		}
 
@@ -256,9 +286,16 @@ class AutoSSSpecsafe : CgcModule(
 
 	override fun onWorldLoad() {
 		resetState()
+		resetServerTiming()
 	}
 
 	override fun onChatMessage(message: String) {
+		if (runOnClientThread { handleChatMessage(message) }) {
+			return
+		}
+	}
+
+	private fun handleChatMessage(message: String) {
 		if (areaCheck() && autoStart.value && Minecraft.getInstance().player != null) {
 			if (message == "[BOSS] Goldor: Who dares trespass into my domain?") {
 				start()
@@ -268,52 +305,131 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	override fun onActionBarMessage(message: String) {
-		handlePossibleSimonSaysFailure(message)
+		runOnClientThread { handlePossibleSimonSaysFailure(message) }
 	}
 
 	override fun onBlockChange(pos: BlockPos, oldState: BlockState?, newState: BlockState) {
+		if (runOnClientThread { handleBlockChange(pos.immutable(), oldState, newState) }) {
+			return
+		}
+	}
+
+	override fun onPacketSend(packet: Packet<*>): Boolean {
+		val captureTarget = clickPacketCaptureTarget
+		if (captureTarget != null
+			&& packet is ServerboundUseItemOnPacket
+			&& packet.hitResult.blockPos == captureTarget
+		) {
+			capturedClickPacketSequence = packet.sequence
+		}
+		return false
+	}
+
+	override fun onPacketReceive(packet: Packet<*>): Boolean {
+		val receivedAtMs = nowMs()
+		val acknowledgedSequence = newestAcknowledgedPredictionSequence(packet)
+		val serverGameTime = newestServerGameTime(packet)
+		if (acknowledgedSequence != null || serverGameTime != null) {
+			runOnClientThread {
+				if (serverGameTime != null) {
+					observeServerTime(serverGameTime, receivedAtMs)
+				}
+				if (acknowledgedSequence != null) {
+					acknowledgePendingClickFromPrediction(acknowledgedSequence)
+				}
+			}
+		}
+		return false
+	}
+
+	private fun newestAcknowledgedPredictionSequence(packet: Packet<*>): Int? =
+		when (packet) {
+			is ClientboundBlockChangedAckPacket -> packet.sequence
+			is ClientboundBundlePacket -> packet.subPackets()
+				.mapNotNull(::newestAcknowledgedPredictionSequence)
+				.maxOrNull()
+			else -> null
+		}
+
+	private fun newestServerGameTime(packet: Packet<*>): Long? =
+		when (packet) {
+			is ClientboundSetTimePacket -> packet.gameTime
+			is ClientboundBundlePacket -> packet.subPackets()
+				.mapNotNull(::newestServerGameTime)
+				.lastOrNull()
+			else -> null
+		}
+
+	private fun handleBlockChange(pos: BlockPos, oldState: BlockState?, newState: BlockState) {
+		acknowledgePendingClickFromBlockUpdate(pos, newState)
 		if (!doingSS
-			|| startClicksRemaining > 0
 			|| !areaCheck()
-			|| !newState.`is`(Blocks.SEA_LANTERN)
+			|| !isPatternLightUpdate(pos, newState)
+			|| oldState?.`is`(Blocks.SEA_LANTERN) == true
 		) {
 			return
 		}
 
-		if (pos.x == 111 && pos.y >= 120 && pos.y <= 123 && pos.z >= 92 && pos.z <= 95) {
-			val button = BlockPos(110, pos.y, pos.z)
-			markPatternChanged()
-			if (clicks.size == 2 && clicks.first() == button && !doneFirst) {
-				doneFirst = true
-				clicks.removeAt(0)
-				allButtons.removeAt(0)
-			}
-
-			if (targetPreAim && !targetOpeningPreAim && button == preAimButton && !canPracticeCurrentSequence()) {
-				clicks.clear()
-				allButtons.clear()
-				clicks.add(button)
-				allButtons.add(Vec3.atLowerCornerOf(button))
-				state = 0
-				doneFirst = true
-				targetPreAim = false
-				targetWaitingForButton = true
-				return
-			}
-
-			if (!clicks.contains(button)) {
-				state = 0
-				clicks.add(button)
-				allButtons.add(Vec3.atLowerCornerOf(button))
-				if (targetPreAim && !targetOpeningPreAim && button == clicks.first()) {
-					targetPreAim = false
-					targetWaitingForButton = true
-				}
-			}
-
-			scheduleOpeningPreAim()
-			continuePracticeDuringPatternDisplay(Minecraft.getInstance())
+		val button = BlockPos(110, pos.y, pos.z)
+		if (!patternCapture.record(button)) {
+			return
 		}
+		markPatternChanged()
+		if (startClicksRemaining > 0) {
+			return
+		}
+
+		if (targetPreAim && !targetOpeningPreAim && button == preAimButton && !canPracticeCurrentSequence()) {
+			targetPreAim = false
+			targetWaitingForButton = true
+		}
+
+		scheduleOpeningPreAim()
+		continuePracticeDuringPatternDisplay(Minecraft.getInstance())
+	}
+
+	private fun commitCapturedPatternIfReady(client: Minecraft, now: Long): Boolean {
+		val level = client.level ?: return false
+		if (patternCapture.observationCount <= 0
+			|| (doneFirst && state < clicks.size)
+			|| now < patternSettledAt
+			|| !level.getBlockState(DETECT).`is`(Blocks.STONE_BUTTON)
+		) {
+			return false
+		}
+
+		val capturedPattern = if (!doneFirst) {
+			patternCapture.openingPattern()
+		} else {
+			when (val replay = patternCapture.nextPattern(clicks)) {
+				PatternReplayResult.Incomplete -> return false
+				PatternReplayResult.Mismatch -> {
+					stopSimonSaysSafely("Auto SS stopped: the displayed pattern did not match the previous round.")
+					return false
+				}
+				is PatternReplayResult.Ready -> replay.buttons
+			}
+		} ?: return false
+
+		clicks.clear()
+		clicks.addAll(capturedPattern)
+		allButtons.clear()
+		allButtons.addAll(capturedPattern.map(Vec3::atLowerCornerOf))
+		state = 0
+		doneFirst = true
+		patternCapture.clear()
+		patternSettledAt = 0L
+		return true
+	}
+
+	private fun runOnClientThread(action: () -> Unit): Boolean {
+		val client = Minecraft.getInstance()
+		if (client.isSameThread) {
+			action()
+			return true
+		}
+		client.execute(action)
+		return false
 	}
 
 	fun SSR() {
@@ -324,12 +440,14 @@ class AutoSSSpecsafe : CgcModule(
 
 	override fun onEnable() {
 		resetState()
+		resetServerTiming()
 		resetKey.register()
 	}
 
 	override fun onDisable() {
 		resetKey.unregister()
 		resetState()
+		resetServerTiming()
 	}
 
 	override fun reset() {
@@ -349,7 +467,7 @@ class AutoSSSpecsafe : CgcModule(
 		doingSS = true
 		startAimPoint = getAimPoint(client.level!!, startButtonPos())
 		startClicksRemaining = 3
-		nextStartClickAt = System.currentTimeMillis() + randomAutoStartDelayMs()
+		nextStartClickAt = nowMs() + randomAutoStartDelayMs()
 	}
 
 	private fun tickTarget(client: Minecraft) {
@@ -393,11 +511,7 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
-		val aimResult = updateAimRotation(client)
-		if (aimResult == null) {
-			clearTarget()
-			return
-		}
+		val aimResult = latestAimResult ?: return
 
 		if (clickPreAimedCurrentButtonIfReady(client)) {
 			return
@@ -415,13 +529,12 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		if (targetPreAim) {
-			// Pre-aim is an idle hold. Keep it alive so the aim controller can
-			// apply settle shake, then let the top-level tick interrupt it as soon
-			// as solving or practice movement is ready.
+			// Pre-aim is an idle hold. The top-level tick interrupts it as soon as
+			// solving or practice movement is ready.
 			return
 		}
 
-		if (System.currentTimeMillis() - lastClickTime < currentClickDelayMs) {
+		if (nowMs() - lastClickTime < currentClickDelayMs) {
 			return
 		}
 
@@ -436,15 +549,35 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		val player = client.player ?: return null
-		val result = aimController.update()
-		applyRotation(player, result.rotation)
-		return result
+		val updateAt = nowMs()
+		val result = aimController.update(updateAt)
+		val actual = mouseMotion.apply(client, player, result.rotation)
+		val plan = aimController.currentPlan() ?: return null
+		val actualError = angularError(actual, plan.final)
+		val practiceTargetReached = plan.mode == AimMode.PRACTICE &&
+			updateAt - plan.startedAtMs >= MIN_PRACTICE_RETARGET_MS &&
+			actualError <= PRACTICE_RETARGET_TOLERANCE
+		return AimUpdateResult(
+			rotation = actual,
+			readyToClick = result.readyToClick && actualError <= ACTUAL_CLICK_READY_TOLERANCE,
+			finished = practiceTargetReached || result.finished && actualError <= ACTUAL_FINISH_TOLERANCE
+		)
 	}
 
-	private fun applyRotation(player: LocalPlayer, rotation: Rotation) {
-		player.yRot = rotation.yaw
-		player.xRot = rotation.pitch.coerceIn(-90.0f, 90.0f)
-		player.yHeadRot = rotation.yaw
+	private fun startAim(
+		player: LocalPlayer,
+		target: Vec3,
+		mode: AimMode,
+		moveContext: AimMoveContext? = null
+	) {
+		latestAimResult = null
+		aimController.start(player, target, getAimSettings(mode), mode, moveContext)
+	}
+
+	private fun angularError(rotation: Rotation, target: Rotation): Double {
+		val yaw = Mth.wrapDegrees(rotation.yaw - target.yaw).toDouble()
+		val pitch = (rotation.pitch - target.pitch).toDouble()
+		return sqrt(yaw * yaw + pitch * pitch)
 	}
 
 	private fun beginLookClick(button: BlockPos, startButton: Boolean) {
@@ -455,7 +588,8 @@ class AutoSSSpecsafe : CgcModule(
 		button: BlockPos,
 		startButton: Boolean,
 		flowingRetarget: Boolean,
-		modeOverride: AimMode? = null
+		modeOverride: AimMode? = null,
+		sequenceIndexOverride: Int? = null
 	) {
 		val client = Minecraft.getInstance()
 		val player = client.player
@@ -482,14 +616,18 @@ class AutoSSSpecsafe : CgcModule(
 		if (startsSolveSequence(mode)) {
 			resetGridMotionHistory()
 		}
-		aimController.start(player, aimPoint, getAimSettings(mode), mode, buildMoveContext(button, mode))
+		startAim(player, aimPoint, mode, buildMoveContext(button, mode, sequenceIndexOverride ?: state))
 		recordGridTarget(button, mode)
 	}
 
 	private fun clickStartButtonIfAlreadyAimed(client: Minecraft): Boolean {
 		val level = client.level ?: return false
-		val now = System.currentTimeMillis()
-		if (now < nextStartClickAt || now - lastClickTime < currentClickDelayMs || !isStartButtonAlreadyAimed(client)) {
+		val now = nowMs()
+		if (now < nextStartClickAt
+			|| now < nextServerSafeClickAtMs
+			|| now - lastClickTime < currentClickDelayMs
+			|| !isStartButtonAlreadyAimed(client)
+		) {
 			return false
 		}
 
@@ -504,7 +642,7 @@ class AutoSSSpecsafe : CgcModule(
 		targetWaitCorrectionStarted = false
 		targetWaitCorrectionOnRealButton = false
 		preAimButton = null
-		targetAimPoint = startAimPoint ?: getAimPoint(level, button)
+		targetAimPoint = targetAimPoint ?: startAimPoint ?: getAimPoint(level, button)
 		clearOpeningPreAim()
 		return clickTarget(client)
 	}
@@ -569,7 +707,7 @@ class AutoSSSpecsafe : CgcModule(
 		targetWaitCorrectionStarted = false
 		targetWaitCorrectionOnRealButton = false
 		preAimButton = null
-		targetAimPoint = getAimPoint(level, button)
+		targetAimPoint = targetAimPoint ?: getAimPoint(level, button)
 		clearOpeningPreAim()
 		seedSolveSequenceStart(button)
 		return clickTarget(client)
@@ -591,77 +729,280 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun clickTarget(client: Minecraft): Boolean {
+		if (pendingClick != null) {
+			return true
+		}
+
 		val button = targetButton ?: return false
-		val player = client.player ?: return false
-		val level = client.level ?: return false
-		val gameMode = client.gameMode ?: return false
-		if (!level.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
-			return false
-		}
-
-		if (player.distanceToSqr(Vec3.atCenterOf(button)) > MAX_BUTTON_DISTANCE_SQ) {
-			return false
-		}
-
-		val hit = getLookHit(client, button)
-		if (hit == null || hit.type == HitResult.Type.MISS || hit.blockPos != button) {
-			return false
-		}
-
-		val clicked = button
 		val clickedStart = targetIsStart
-		clearAutoRestart()
-		lastClickTime = System.currentTimeMillis()
-		currentClickDelayMs = randomClickDelayMs()
-		clickedButton = Vec3.atLowerCornerOf(clicked)
-		gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit)
-		player.swing(InteractionHand.MAIN_HAND)
+		val packetSequence = when (val sendResult = sendClickInteraction(client, button, allowPowered = clickedStart)) {
+			ClickSendResult.NotReady -> return false
+			ClickSendResult.LocallySuppressed -> {
+				stopSimonSaysSafely("Auto SS stopped: another mod blocked its click before it was sent.")
+				return true
+			}
+			is ClickSendResult.Sent -> sendResult.packetSequence
+		}
+
+		val sentAt = nowMs()
+		recordClickAttempt(button, sentAt)
 		if (clickedStart) {
 			startClicksRemaining = max(0, startClicksRemaining - 1)
 			nextStartClickAt = if (startClicksRemaining > 0) {
-				System.currentTimeMillis() + randomStartClickDelayMs()
+				sentAt + randomStartClickDelayMs()
 			} else {
 				0L
 			}
 		}
-		if (!clickedStart) {
-			state++
-			if (state < clicks.size) {
-				if (beginNextSequenceButton(client, true)) {
-					return true
-				}
-				clearTarget()
-				return true
-			}
-			completedSequenceCount++
-			practiceUnlocked = completedSequenceCount >= PRACTICE_UNLOCK_SEQUENCE_COUNT
-			if (clicks.size >= FINAL_SEQUENCE_LENGTH) {
-				finishSimonSays()
-				return true
-			}
-			if (beginPracticeSequence(client)) {
-				return true
-			}
-			if (beginFirstButtonPreAim(client)) {
-				return true
-			}
-		}
 
-		clearTarget()
+		val pending = PendingClick(
+			button = button,
+			startButton = clickedStart,
+			solveIndex = if (clickedStart) -1 else state,
+			packetSequence = packetSequence,
+			sentAtMs = sentAt
+		)
+		pendingClick = pending
+		beginMotionWhileClickPending(client, pending)
 		return true
 	}
 
+	private fun beginMotionWhileClickPending(client: Minecraft, pending: PendingClick) {
+		if (pending.startButton
+			|| !doingSS
+			|| pending.solveIndex !in clicks.indices
+			|| clicks[pending.solveIndex] != pending.button
+		) {
+			return
+		}
+
+		val nextIndex = pending.solveIndex + 1
+		if (nextIndex < clicks.size) {
+			beginSequenceButton(client, nextIndex, flowingRetarget = true)
+			return
+		}
+
+		if (clicks.size >= FINAL_SEQUENCE_LENGTH) {
+			return
+		}
+		if (beginPracticeSequence(client, completedSequenceCount + 1)) {
+			return
+		}
+		beginFirstButtonPreAim(client)
+	}
+
+	private fun sendClickInteraction(client: Minecraft, button: BlockPos, allowPowered: Boolean = false): ClickSendResult {
+		val player = client.player ?: return ClickSendResult.NotReady
+		val level = client.level ?: return ClickSendResult.NotReady
+		val gameMode = client.gameMode ?: return ClickSendResult.NotReady
+		if (nowMs() < nextServerSafeClickAtMs) {
+			return ClickSendResult.NotReady
+		}
+		if (client.screen != null || !client.mouseHandler.isMouseGrabbed || gameMode.isDestroying || player.isHandsBusy) {
+			return ClickSendResult.NotReady
+		}
+
+		val buttonState = level.getBlockState(button)
+		if (!buttonState.`is`(Blocks.STONE_BUTTON) || !allowPowered && isPressedStoneButton(buttonState)) {
+			return ClickSendResult.NotReady
+		}
+		if (player.distanceToSqr(Vec3.atCenterOf(button)) > MAX_BUTTON_DISTANCE_SQ) {
+			return ClickSendResult.NotReady
+		}
+		if (getVerifiedClickHit(client, button) == null) {
+			return ClickSendResult.NotReady
+		}
+
+		clickPacketCaptureTarget = button
+		capturedClickPacketSequence = null
+		try {
+			(client as MinecraftAccessor).cgcStartUseItem()
+		} finally {
+			clickPacketCaptureTarget = null
+		}
+		val packetSequence = capturedClickPacketSequence
+		capturedClickPacketSequence = null
+		return if (packetSequence == null) {
+			ClickSendResult.LocallySuppressed
+		} else {
+			ClickSendResult.Sent(packetSequence)
+		}
+	}
+
+	private fun recordClickAttempt(button: BlockPos, sentAt: Long) {
+		clearAutoRestart()
+		lastClickTime = sentAt
+		currentClickDelayMs = randomClickDelayMs()
+		nextServerSafeClickAtMs = sentAt + randomServerSafeClickSpacingMs()
+		clickedButton = Vec3.atLowerCornerOf(button)
+	}
+
+	private fun acknowledgePendingClickFromPrediction(acknowledgedSequence: Int) {
+		val pending = pendingClick ?: return
+		// Acknowledgements are cumulative, so a newer sequence also proves this
+		// click has crossed a server processing boundary.
+		if (acknowledgedSequence < pending.packetSequence) {
+			return
+		}
+
+		observeInteractionAck(nowMs() - pending.sentAtMs)
+		completePendingClick(Minecraft.getInstance(), pending)
+	}
+
+	private fun observeInteractionAck(sampleMs: Long) {
+		val boundedSample = sampleMs.coerceIn(MIN_ACK_SAMPLE_MS, MAX_ACK_SAMPLE_MS)
+		smoothedInteractionAckMs = if (smoothedInteractionAckMs <= 0L) {
+			boundedSample
+		} else {
+			(smoothedInteractionAckMs * 2L + boundedSample) / 3L
+		}
+	}
+
+	private fun observeServerTime(gameTime: Long, receivedAtMs: Long) {
+		val previousGameTime = lastServerGameTime
+		val previousReceivedAt = lastServerTimePacketAtMs
+		lastServerGameTime = gameTime
+		lastServerTimePacketAtMs = receivedAtMs
+		if (previousGameTime == null || gameTime <= previousGameTime || previousReceivedAt <= 0L) {
+			return
+		}
+
+		val elapsedTicks = gameTime - previousGameTime
+		val elapsedMs = receivedAtMs - previousReceivedAt
+		if (elapsedTicks !in MIN_SERVER_TIME_SAMPLE_TICKS..MAX_SERVER_TIME_SAMPLE_TICKS || elapsedMs <= 0L) {
+			return
+		}
+
+		val sampleMs = elapsedMs.toDouble() / elapsedTicks.toDouble()
+		if (sampleMs !in MIN_SERVER_TICK_SAMPLE_MS..MAX_SERVER_TICK_SAMPLE_MS) {
+			return
+		}
+		val previousEstimate = estimatedServerTickMs
+		estimatedServerTickMs = if (previousEstimate == null) {
+			sampleMs
+		} else {
+			previousEstimate * SERVER_TICK_SMOOTHING_OLD_WEIGHT + sampleMs * (1.0 - SERVER_TICK_SMOOTHING_OLD_WEIGHT)
+		}
+	}
+
+	private fun resetServerTiming() {
+		lastServerGameTime = null
+		lastServerTimePacketAtMs = 0L
+		estimatedServerTickMs = null
+	}
+
+	private fun acknowledgePendingClickFromBlockUpdate(pos: BlockPos, newState: BlockState) {
+		val pending = pendingClick ?: return
+		val buttonPressed = !pending.startButton && pos == pending.button && isPressedStoneButton(newState)
+		val serverAdvancedPattern = isPatternLightUpdate(pos, newState) &&
+			(pending.startButton || pending.solveIndex >= clicks.lastIndex)
+		if (!buttonPressed && !serverAdvancedPattern) {
+			return
+		}
+
+		completePendingClick(Minecraft.getInstance(), pending)
+	}
+
+	private fun completePendingClick(client: Minecraft, pending: PendingClick) {
+		if (pendingClick?.packetSequence != pending.packetSequence) {
+			return
+		}
+		pendingClick = null
+		if (!doingSS) {
+			clearTarget()
+			return
+		}
+
+		if (pending.startButton) {
+			clearTarget()
+			return
+		}
+
+		if (pending.solveIndex !in clicks.indices || clicks[pending.solveIndex] != pending.button) {
+			clearTarget()
+			return
+		}
+		state = pending.solveIndex + 1
+		if (state < clicks.size) {
+			if (isPreparedSequenceMotion(clicks[state])) {
+				return
+			}
+			if (beginNextSequenceButton(client, true)) {
+				return
+			}
+			clearTarget()
+			return
+		}
+
+		patternCapture.clear()
+		patternSettledAt = 0L
+		completedSequenceCount++
+		practiceUnlocked = completedSequenceCount >= PRACTICE_UNLOCK_SEQUENCE_COUNT
+		if (clicks.size >= FINAL_SEQUENCE_LENGTH) {
+			finishSimonSays()
+			return
+		}
+		if (isPreparedPracticeMotion() && canPracticeCurrentSequence()) {
+			return
+		}
+		if (beginPracticeSequence(client)) {
+			return
+		}
+		if (isPreparedFirstButtonPreAim()) {
+			return
+		}
+		if (beginFirstButtonPreAim(client)) {
+			return
+		}
+		clearTarget()
+	}
+
+	private fun isPreparedSequenceMotion(button: BlockPos): Boolean =
+		targetButton == button &&
+			targetAimPoint != null &&
+			!targetIsStart &&
+			!targetPreAim &&
+			!targetOpeningPreAim &&
+			!targetPractice &&
+			!targetWaitingForButton &&
+			aimController.hasTarget()
+
+	private fun isPreparedPracticeMotion(): Boolean =
+		targetPractice &&
+			targetButton in practiceButtons &&
+			targetAimPoint != null &&
+			aimController.hasTarget()
+
+	private fun isPreparedFirstButtonPreAim(): Boolean =
+		targetButton == clicks.firstOrNull() &&
+			targetPreAim &&
+			!targetOpeningPreAim &&
+			!targetPractice &&
+			targetAimPoint != null &&
+			aimController.hasTarget()
+
+	private fun isPressedStoneButton(state: BlockState): Boolean =
+		state.`is`(Blocks.STONE_BUTTON) && state.getValue(ButtonBlock.POWERED)
+
+	private fun isPatternLightUpdate(pos: BlockPos, state: BlockState): Boolean =
+		state.`is`(Blocks.SEA_LANTERN) &&
+			pos.x == 111 && pos.y in 120..123 && pos.z in 92..95
+
 	private fun beginNextSequenceButton(client: Minecraft, flowingRetarget: Boolean): Boolean {
-		if (state >= clicks.size) {
+		return beginSequenceButton(client, state, flowingRetarget)
+	}
+
+	private fun beginSequenceButton(client: Minecraft, index: Int, flowingRetarget: Boolean): Boolean {
+		if (index !in clicks.indices) {
 			return false
 		}
 
-		val next = clicks[state]
+		val next = clicks[index]
 		if (!client.level!!.getBlockState(next).`is`(Blocks.STONE_BUTTON)) {
 			return false
 		}
 
-		beginLookClick(next, false, flowingRetarget)
+		beginLookClick(next, false, flowingRetarget, sequenceIndexOverride = index)
 		return true
 	}
 
@@ -681,6 +1022,7 @@ class AutoSSSpecsafe : CgcModule(
 
 		beginLookClick(first, false, false, AimMode.PRE_AIM)
 		targetPreAim = true
+		targetWaitCorrectionOnRealButton = true
 		preAimButton = first
 		return true
 	}
@@ -696,7 +1038,7 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		openingPreAimButton = first
-		openingPreAimAt = System.currentTimeMillis() + FIRST_PATTERN_PRE_AIM_REACTION_MS
+		openingPreAimAt = nowMs() + FIRST_PATTERN_PRE_AIM_REACTION_MS
 	}
 
 	private fun tickOpeningPreAim(client: Minecraft, now: Long): Boolean {
@@ -732,26 +1074,27 @@ class AutoSSSpecsafe : CgcModule(
 		targetPractice = false
 		targetWaitingForButton = false
 		targetWaitCorrectionStarted = false
-		targetWaitCorrectionOnRealButton = false
+		val realButton = level.getBlockState(button).`is`(Blocks.STONE_BUTTON)
+		targetWaitCorrectionOnRealButton = realButton
 		preAimButton = button
-		targetAimPoint = if (level.getBlockState(button).`is`(Blocks.STONE_BUTTON)) {
+		targetAimPoint = if (realButton) {
 			getAimPoint(level, button, PRE_AIM_TOLERANCE)
 		} else {
 			getPracticeAimPoint(button, PRE_AIM_AIM_OFFSET)
 		}
-		aimController.start(player, targetAimPoint!!, getAimSettings(AimMode.PRE_AIM), AimMode.PRE_AIM)
+		startAim(player, targetAimPoint!!, AimMode.PRE_AIM)
 		return true
 	}
 
 	private fun openingFirstButtonCandidate(): BlockPos? {
-		if (!doingSS || completedSequenceCount != 0 || state != 0 || clicks.isEmpty()) {
+		if (!doingSS || completedSequenceCount != 0 || state != 0) {
 			return null
 		}
 
 		return if (doneFirst) {
 			clicks.firstOrNull()
 		} else {
-			clicks.getOrNull(1)
+			patternCapture.openingPattern()?.firstOrNull()
 		}
 	}
 
@@ -760,8 +1103,11 @@ class AutoSSSpecsafe : CgcModule(
 		openingPreAimAt = 0L
 	}
 
-	private fun beginPracticeSequence(client: Minecraft): Boolean {
-		if (!canPracticeCurrentSequence()) {
+	private fun beginPracticeSequence(
+		client: Minecraft,
+		completedSequences: Int = completedSequenceCount
+	): Boolean {
+		if (!canPracticeCurrentSequence(completedSequences)) {
 			return false
 		}
 
@@ -852,10 +1198,9 @@ class AutoSSSpecsafe : CgcModule(
 		return shouldPracticeCurrentSequence(client) || readyToSolveCurrentPattern(client)
 	}
 
-	private fun canPracticeCurrentSequence(): Boolean =
+	private fun canPracticeCurrentSequence(completedSequences: Int = completedSequenceCount): Boolean =
 		practiceAimCycles.value &&
-			practiceUnlocked &&
-			completedSequenceCount >= PRACTICE_UNLOCK_SEQUENCE_COUNT &&
+			completedSequences >= PRACTICE_UNLOCK_SEQUENCE_COUNT &&
 			clicks.isNotEmpty() &&
 			clicks.size <= FINAL_SEQUENCE_LENGTH
 
@@ -863,29 +1208,7 @@ class AutoSSSpecsafe : CgcModule(
 		1
 
 	private fun shouldAdvancePracticeTarget(aimResult: AimUpdateResult): Boolean {
-		if (aimResult.finished) {
-			return true
-		}
-		if (targetPracticeReturningToStart || practiceButtons.size <= 1) {
-			return false
-		}
-
-		val plan = aimController.currentPlan() ?: return false
-		if (plan.mode != AimMode.PRACTICE) {
-			return false
-		}
-
-		val elapsedMs = max(0L, System.currentTimeMillis() - plan.startedAtMs)
-		val progress = (elapsedMs.toDouble() / max(1L, plan.durationMs)).coerceIn(0.0, 1.0)
-		val finalPatternButton = targetPracticeIndex >= practiceButtons.lastIndex
-		return progress >= practicePassThroughProgress(plan, finalPatternButton)
-	}
-
-	private fun practicePassThroughProgress(plan: AimPlan, finalPatternButton: Boolean): Double {
-		val distanceScale = (plan.angularDistance / MEDIUM_PRACTICE_TURN_DISTANCE).coerceIn(0.0, 1.0)
-		val seedJitter = (((plan.seed and Long.MAX_VALUE) % 1000L).toDouble() / 999.0 - 0.5) * 0.06
-		val finalButtonHold = if (finalPatternButton) 0.06 else 0.0
-		return (0.82 - distanceScale * 0.16 + seedJitter + finalButtonHold).coerceIn(0.62, 0.90)
+		return aimResult.finished
 	}
 
 	private fun beginNextPracticeButton(client: Minecraft): Boolean {
@@ -901,9 +1224,9 @@ class AutoSSSpecsafe : CgcModule(
 			}
 
 			if (practiceResumeAt <= 0L) {
-				practiceResumeAt = System.currentTimeMillis() + randomPracticeResumeDelayMs()
+				practiceResumeAt = nowMs() + randomPracticeResumeDelayMs()
 			}
-			if (System.currentTimeMillis() < practiceResumeAt) {
+			if (nowMs() < practiceResumeAt) {
 				return true
 			}
 
@@ -930,10 +1253,10 @@ class AutoSSSpecsafe : CgcModule(
 				return true
 			}
 			if (practiceReturnAt <= 0L) {
-				practiceReturnAt = System.currentTimeMillis() + PRACTICE_RETURN_PAUSE_MS
+				practiceReturnAt = nowMs() + PRACTICE_RETURN_PAUSE_MS
 				return true
 			}
-			if (System.currentTimeMillis() < practiceReturnAt) {
+			if (nowMs() < practiceReturnAt) {
 				return true
 			}
 
@@ -985,7 +1308,7 @@ class AutoSSSpecsafe : CgcModule(
 			getPracticeAimPoint(button)
 		}
 		val mode = if (returnToStart) AimMode.PRACTICE_RETURN else AimMode.PRACTICE
-		aimController.start(player, targetAimPoint!!, getAimSettings(mode), mode, buildMoveContext(button, mode))
+		startAim(player, targetAimPoint!!, mode, buildMoveContext(button, mode))
 		recordGridTarget(button, mode)
 	}
 
@@ -1003,6 +1326,10 @@ class AutoSSSpecsafe : CgcModule(
 		if (targetWaitCorrectionOnRealButton) {
 			return false
 		}
+		if (getLookHit(client, button) != null) {
+			targetWaitCorrectionOnRealButton = true
+			return false
+		}
 		if (!aimResult.finished && !targetWaitCorrectionStarted) {
 			return false
 		}
@@ -1010,11 +1337,11 @@ class AutoSSSpecsafe : CgcModule(
 		targetAimPoint = getAimPoint(level, button)
 		targetWaitCorrectionStarted = true
 		targetWaitCorrectionOnRealButton = true
-		aimController.start(player, targetAimPoint!!, getAimSettings(AimMode.WAIT_CORRECTION), AimMode.WAIT_CORRECTION)
+		startAim(player, targetAimPoint!!, AimMode.WAIT_CORRECTION)
 		return true
 	}
 
-	private fun buildMoveContext(button: BlockPos, mode: AimMode): AimMoveContext? {
+	private fun buildMoveContext(button: BlockPos, mode: AimMode, sequenceIndex: Int = state): AimMoveContext? {
 		if (!tracksGridMotion(mode)) {
 			return null
 		}
@@ -1031,7 +1358,7 @@ class AutoSSSpecsafe : CgcModule(
 		val diagonal = kotlin.math.abs(rowDelta) == kotlin.math.abs(columnDelta) && rowDelta != 0
 		val currentMotion = GridMotion(rowDelta, columnDelta)
 		val alignment = previousGridMotion?.alignmentWith(currentMotion)
-		val nextMotion = nextGridMotion(button, mode)
+		val nextMotion = nextGridMotion(button, mode, sequenceIndex)
 		val nextChebyshevDistance = if (nextMotion == null) {
 			0
 		} else {
@@ -1092,10 +1419,10 @@ class AutoSSSpecsafe : CgcModule(
 			else -> false
 		}
 
-	private fun nextGridMotion(button: BlockPos, mode: AimMode): GridMotion? {
+	private fun nextGridMotion(button: BlockPos, mode: AimMode, sequenceIndex: Int = state): GridMotion? {
 		val nextButton = when (mode) {
 			AimMode.NORMAL_BUTTON,
-			AimMode.CHAINED_RETARGET -> clicks.getOrNull(state + 1)
+			AimMode.CHAINED_RETARGET -> clicks.getOrNull(sequenceIndex + 1)
 			AimMode.PRACTICE -> practiceButtons.getOrNull(targetPracticeIndex + 1)
 			AimMode.PRACTICE_RETURN -> null
 			else -> null
@@ -1110,10 +1437,11 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun readyToSolveCurrentPattern(client: Minecraft): Boolean {
-		val now = System.currentTimeMillis()
+		val now = nowMs()
 		return doingSS &&
 			startClicksRemaining <= 0 &&
 			now - lastClickTime >= currentClickDelayMs &&
+			now >= nextServerSafeClickAtMs &&
 			now >= patternSettledAt &&
 			client.level?.getBlockState(DETECT)?.`is`(Blocks.STONE_BUTTON) == true &&
 			state < clicks.size
@@ -1142,7 +1470,34 @@ class AutoSSSpecsafe : CgcModule(
 		val look = player.lookAngle
 		val end = eye.add(look.scale(RAYCAST_DISTANCE))
 		val hit = level.clip(ClipContext(eye, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player))
-		return if (hit.type != HitResult.Type.MISS && hit.blockPos == expected) hit else null
+		return if (hit.type != HitResult.Type.MISS && hit.blockPos == expected && isHitInsideBlockShape(level, expected, hit.location)) {
+			hit
+		} else {
+			null
+		}
+	}
+
+	private fun getVerifiedClickHit(client: Minecraft, expected: BlockPos): BlockHitResult? {
+		val level = client.level ?: return null
+		val freshHit = getLookHit(client, expected)
+		val crosshairHit = client.hitResult as? BlockHitResult
+		if (freshHit == null
+			|| crosshairHit == null
+			|| crosshairHit.type == HitResult.Type.MISS
+			|| crosshairHit.blockPos != expected
+			|| !isHitInsideBlockShape(level, expected, crosshairHit.location)
+		) {
+			return null
+		}
+		return freshHit
+	}
+
+	private fun isHitInsideBlockShape(level: ClientLevel, pos: BlockPos, hitPoint: Vec3): Boolean {
+		val shape = level.getBlockState(pos).getShape(level, pos)
+		if (shape.isEmpty) {
+			return false
+		}
+		return shape.bounds().move(pos).inflate(BUTTON_HIT_EPSILON).contains(hitPoint)
 	}
 
 	private fun getAimPoint(level: ClientLevel, pos: BlockPos): Vec3 =
@@ -1167,10 +1522,12 @@ class AutoSSSpecsafe : CgcModule(
 
 	private fun getPracticeAimPoint(pos: BlockPos, maxOffset: Double): Vec3 {
 		val random = ThreadLocalRandom.current()
+		val verticalOffset = min(maxOffset, VIRTUAL_BUTTON_VERTICAL_OFFSET)
+		val horizontalOffset = min(maxOffset * VIRTUAL_BUTTON_HORIZONTAL_SCALE, VIRTUAL_BUTTON_HORIZONTAL_OFFSET)
 		return Vec3(
-			pos.x + PRACTICE_BUTTON_FACE_X + middleOffset(random, maxOffset),
-			pos.y + 0.5 + middleOffset(random, maxOffset),
-			pos.z + 0.5 + middleOffset(random, maxOffset)
+			pos.x + PRACTICE_BUTTON_FACE_X,
+			pos.y + 0.5 + middleOffset(random, verticalOffset),
+			pos.z + 0.5 + middleOffset(random, horizontalOffset)
 		)
 	}
 
@@ -1206,7 +1563,7 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun markPatternChanged() {
-		patternSettledAt = System.currentTimeMillis() + randomClickDelayMs()
+		patternSettledAt = nowMs() + randomPatternSettleDelayMs()
 	}
 
 	private fun scheduleAutoRestart(): Boolean {
@@ -1215,7 +1572,7 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		if (autoRestartAt <= 0L) {
-			autoRestartAt = System.currentTimeMillis() + randomAutoRestartReactionDelayMs()
+			autoRestartAt = nowMs() + randomAutoRestartReactionDelayMs()
 		}
 		return true
 	}
@@ -1287,6 +1644,7 @@ class AutoSSSpecsafe : CgcModule(
 		allButtons.clear()
 		clicks.clear()
 		practiceButtons.clear()
+		patternCapture.clear()
 		clearTarget()
 		startAimPoint = null
 		startClicksRemaining = 0
@@ -1301,6 +1659,8 @@ class AutoSSSpecsafe : CgcModule(
 		practiceMaxPasses = 0
 		practiceReturnAt = 0L
 		practiceResumeAt = 0L
+		smoothedInteractionAckMs = 0L
+		nextServerSafeClickAtMs = 0L
 		resetGridMotionHistory()
 		clearAutoRestart()
 		clearOpeningPreAim()
@@ -1310,9 +1670,18 @@ class AutoSSSpecsafe : CgcModule(
 	private fun finishSimonSays() {
 		AutoLeap.onSimonSaysComplete()
 		doingSS = false
-		donePopupUntil = System.currentTimeMillis() + DONE_POPUP_MS
+		donePopupUntil = nowMs() + DONE_POPUP_MS
+		patternCapture.clear()
 		clearAutoRestart()
 		clearTarget()
+	}
+
+	private fun stopSimonSaysSafely(message: String) {
+		doingSS = false
+		patternCapture.clear()
+		clearAutoRestart()
+		clearTarget()
+		chat(message)
 	}
 
 	private fun clearTarget() {
@@ -1331,6 +1700,9 @@ class AutoSSSpecsafe : CgcModule(
 		practiceReturnAt = 0L
 		clearOpeningPreAim()
 		aimController.clear()
+		latestAimResult = null
+		mouseMotion.clear()
+		pendingClick = null
 	}
 
 	private fun middleOffset(random: ThreadLocalRandom, maxOffset: Double): Double {
@@ -1381,6 +1753,42 @@ class AutoSSSpecsafe : CgcModule(
 		return ThreadLocalRandom.current().nextLong(low, high + 1L)
 	}
 
+	private fun randomPatternSettleDelayMs(): Long {
+		val ackMinimum = if (smoothedInteractionAckMs <= 0L) {
+			PATTERN_SETTLE_MIN_MS
+		} else {
+			(smoothedInteractionAckMs * PATTERN_SETTLE_ACK_PERCENT / 100L)
+				.coerceIn(PATTERN_SETTLE_MIN_MS, PATTERN_SETTLE_ADAPTIVE_MAX_MS)
+		}
+		val serverTickMinimum = estimatedServerTickMs
+			?.times(PATTERN_SETTLE_SERVER_TICK_MULTIPLIER)
+			?.toLong()
+			?.coerceIn(PATTERN_SETTLE_MIN_MS, PATTERN_SETTLE_ADAPTIVE_MAX_MS)
+			?: PATTERN_SETTLE_MIN_MS
+		val adaptiveMinimum = max(ackMinimum, serverTickMinimum)
+		val adaptiveMaximum = min(PATTERN_SETTLE_MAX_MS, adaptiveMinimum + PATTERN_SETTLE_JITTER_MS)
+		return ThreadLocalRandom.current().nextLong(adaptiveMinimum, adaptiveMaximum + 1L)
+	}
+
+	private fun randomServerSafeClickSpacingMs(): Long {
+		val serverTickSpacing = estimatedServerTickMs
+			?.times(SERVER_SAFE_CLICK_TICK_MULTIPLIER)
+			?.toLong()
+			?: 0L
+		val minimum = max(MIN_SERVER_SAFE_CLICK_SPACING_MS, serverTickSpacing)
+			.coerceAtMost(MAX_SERVER_SAFE_CLICK_SPACING_MS)
+		return minimum + ThreadLocalRandom.current().nextLong(SERVER_SAFE_CLICK_JITTER_MS + 1L)
+	}
+
+	private fun pendingClickTimeoutMs(): Long {
+		val adaptiveTimeout = if (smoothedInteractionAckMs <= 0L) {
+			MIN_PENDING_CLICK_TIMEOUT_MS
+		} else {
+			smoothedInteractionAckMs * PENDING_CLICK_TIMEOUT_ACK_MULTIPLIER
+		}
+		return adaptiveTimeout.coerceIn(MIN_PENDING_CLICK_TIMEOUT_MS, MAX_PENDING_CLICK_TIMEOUT_MS)
+	}
+
 	private fun randomPracticeResumeDelayMs(): Long =
 		ThreadLocalRandom.current().nextLong(MIN_PRACTICE_RESUME_DELAY_MS, MAX_PRACTICE_RESUME_DELAY_MS + 1L)
 
@@ -1399,13 +1807,16 @@ class AutoSSSpecsafe : CgcModule(
 		private const val START_BUTTON_FACE_RAY_EPSILON = 1.0E-5
 		private const val START_BUTTON_PHYSICAL_HALF_HEIGHT = 0.145
 		private const val START_BUTTON_PHYSICAL_HALF_WIDTH = 0.205
+		private const val BUTTON_HIT_EPSILON = 0.03
 		private const val FINAL_SEQUENCE_LENGTH = 5
 		private const val PRACTICE_UNLOCK_SEQUENCE_COUNT = 2
 		private const val PRACTICE_BUTTON_FACE_X = 0.875
-		private const val PRACTICE_AIM_OFFSET = 0.44
-		private const val PRE_AIM_AIM_OFFSET = 0.16
-		private const val PRACTICE_RETURN_AIM_OFFSET = 0.18
-		private const val MEDIUM_PRACTICE_TURN_DISTANCE = 32.0
+		private const val PRACTICE_AIM_OFFSET = 0.13
+		private const val PRE_AIM_AIM_OFFSET = 0.055
+		private const val PRACTICE_RETURN_AIM_OFFSET = 0.085
+		private const val VIRTUAL_BUTTON_VERTICAL_OFFSET = 0.085
+		private const val VIRTUAL_BUTTON_HORIZONTAL_OFFSET = 0.135
+		private const val VIRTUAL_BUTTON_HORIZONTAL_SCALE = 1.45
 		private const val FIRST_PATTERN_PRE_AIM_REACTION_MS = 180L
 		private const val PRACTICE_RETURN_PAUSE_MS = 100L
 		private const val MIN_PRACTICE_RESUME_DELAY_MS = 500L
@@ -1418,15 +1829,42 @@ class AutoSSSpecsafe : CgcModule(
 		private const val PRACTICE_RETURN_RANDOMNESS = 0.045
 		private const val AIM_TOLERANCE = 0.18
 		private const val PRE_AIM_TOLERANCE = 0.07
+		private const val ACTUAL_CLICK_READY_TOLERANCE = 0.22
+		private const val ACTUAL_FINISH_TOLERANCE = 0.14
+		private const val PRACTICE_RETARGET_TOLERANCE = 0.22
+		private const val MIN_PRACTICE_RETARGET_MS = 60L
 		private const val OVERSHOOT_STRENGTH = 1.0
 		private const val MICRO_CORRECTION = 0.55
 		private const val CLICK_DELAY_MIN_MS = 8L
 		private const val CLICK_DELAY_MAX_MS = 14L
 		private const val MIN_CLICK_DELAY_VARIANCE_MS = 4L
+		private const val PATTERN_SETTLE_MIN_MS = 90L
+		private const val PATTERN_SETTLE_ADAPTIVE_MAX_MS = 220L
+		private const val PATTERN_SETTLE_MAX_MS = 260L
+		private const val PATTERN_SETTLE_JITTER_MS = 40L
+		private const val PATTERN_SETTLE_ACK_PERCENT = 45L
+		private const val PATTERN_SETTLE_SERVER_TICK_MULTIPLIER = 1.05
+		private const val MIN_ACK_SAMPLE_MS = 1L
+		private const val MAX_ACK_SAMPLE_MS = 2000L
+		private const val MIN_PENDING_CLICK_TIMEOUT_MS = 6000L
+		private const val MAX_PENDING_CLICK_TIMEOUT_MS = 15000L
+		private const val PENDING_CLICK_TIMEOUT_ACK_MULTIPLIER = 6L
+		private const val MIN_SERVER_SAFE_CLICK_SPACING_MS = 125L
+		private const val MAX_SERVER_SAFE_CLICK_SPACING_MS = 350L
+		private const val SERVER_SAFE_CLICK_JITTER_MS = 25L
+		private const val SERVER_SAFE_CLICK_TICK_MULTIPLIER = 1.15
+		private const val MIN_SERVER_TIME_SAMPLE_TICKS = 1L
+		private const val MAX_SERVER_TIME_SAMPLE_TICKS = 200L
+		private const val MIN_SERVER_TICK_SAMPLE_MS = 20.0
+		private const val MAX_SERVER_TICK_SAMPLE_MS = 500.0
+		private const val SERVER_TICK_SMOOTHING_OLD_WEIGHT = 0.7
 		private const val MIN_START_CLICK_DELAY_MS = 105L
 		private const val MAX_START_CLICK_DELAY_MS = 130L
 		private const val AUTO_START_DELAY_RANDOM_EXTRA_MS = 40L
 		private val CONTROL_CODE_PATTERN = Regex("(?i)§[0-9A-FK-OR]")
+
+		private fun nowMs(): Long =
+			System.nanoTime() / 1_000_000L
 
 		private fun startButtonPos(): BlockPos =
 			BlockPos.containing(START_BUTTON.x, START_BUTTON.y, START_BUTTON.z)
@@ -1448,5 +1886,19 @@ class AutoSSSpecsafe : CgcModule(
 
 			return ((row * other.row) + (column * other.column)) / (length * otherLength)
 		}
+	}
+
+	private data class PendingClick(
+		val button: BlockPos,
+		val startButton: Boolean,
+		val solveIndex: Int,
+		val packetSequence: Int,
+		val sentAtMs: Long
+	)
+
+	private sealed interface ClickSendResult {
+		data object NotReady : ClickSendResult
+		data object LocallySuppressed : ClickSendResult
+		data class Sent(val packetSequence: Int) : ClickSendResult
 	}
 }

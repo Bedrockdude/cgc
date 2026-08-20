@@ -47,6 +47,10 @@ object CgcClient : ClientModInitializer {
 			CgcModules.worldLoad()
 		}
 
+		ClientPlayConnectionEvents.DISCONNECT.register { _, _ ->
+			CgcModules.worldLoad()
+		}
+
 		ClientSendMessageEvents.ALLOW_CHAT.register { message ->
 			CgcCommandRegistry.handlePrefixedChat(message)
 		}

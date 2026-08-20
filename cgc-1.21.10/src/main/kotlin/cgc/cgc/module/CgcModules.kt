@@ -11,6 +11,7 @@ import cgc.cgc.module.impl.dungeon.BreakerAura
 import cgc.cgc.module.impl.dungeon.DungeonBreaker
 import cgc.cgc.module.impl.dungeon.FastLeap
 import cgc.cgc.module.impl.dungeon.LeapCounter
+import cgc.cgc.module.impl.dungeon.PhaseTracker
 import cgc.cgc.module.impl.dungeon.Relics
 import cgc.cgc.module.impl.dungeon.SSTriggerBot
 import cgc.cgc.module.impl.dungeon.TerminalSolver
@@ -28,6 +29,7 @@ import cgc.cgc.module.impl.render.EnderPearlTrajectory
 import cgc.cgc.module.impl.render.Trail
 import cgc.cgc.module.impl.render.opsec.OpSec
 import cgc.cgc.module.impl.utils.FreezeState
+import cgc.cgc.module.impl.utils.TerminalTimes
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.runtime.CgcRuntime
 import cgc.cgc.location.Location
@@ -52,9 +54,11 @@ object CgcModules {
 			Ether(),
 			VelocityBuffer(),
 			FreezeState(),
+			TerminalTimes(),
 			DungeonBreaker(),
 			BreakerAura(),
 			LeapCounter(),
+			PhaseTracker(),
 			FastLeap(),
 			AutoC(),
 			AutoLeap(),

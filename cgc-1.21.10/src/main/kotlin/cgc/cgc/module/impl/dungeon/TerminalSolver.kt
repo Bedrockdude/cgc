@@ -4,7 +4,6 @@ import cgc.cgc.data.Colour
 import cgc.cgc.mixin.accessor.AccessorAbstractContainerScreen
 import cgc.cgc.module.CgcModule
 import cgc.cgc.module.ModuleCategory
-import cgc.cgc.module.PacketReceiveModule
 import cgc.cgc.module.PacketSendModule
 import cgc.cgc.module.SubModule
 import cgc.cgc.module.WorldLoadModule
@@ -25,7 +24,7 @@ class TerminalSolver : CgcModule(
 	category = ModuleCategory.DUNGEONS,
 	description = "Provides terminal-solver options used by CGC terminal modules.",
 	defaultEnabled = false
-), PacketReceiveModule, PacketSendModule, WorldLoadModule {
+), PacketSendModule, WorldLoadModule {
 	private val terminalsSetting = MultiBoolSetting(
 		"Terminals",
 		listOf("Melody", "Order", "Panes", "Rubix", "Select", "Starts With"),
@@ -132,11 +131,6 @@ class TerminalSolver : CgcModule(
 			statsGroup,
 			coloursGroup
 		)
-	}
-
-	override fun onPacketReceive(packet: Packet<*>): Boolean {
-		AutoTerms.handlePacketForTerminalSolver(packet)
-		return false
 	}
 
 	override fun onPacketSend(packet: Packet<*>): Boolean {

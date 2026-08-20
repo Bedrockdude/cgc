@@ -1,6 +1,7 @@
 package cgc.cgc.module.impl.dungeon.autoc
 
 import cgc.cgc.data.DungeonClass
+import cgc.cgc.data.Phase7
 import cgc.cgc.data.Pos
 import cgc.cgc.module.impl.dungeon.LeapCounter
 import cgc.cgc.module.impl.dungeon.autoc.nodes.BreakNode
@@ -54,11 +55,13 @@ class AutoCNodeAdapter : JsonDeserializer<AutoCNode>, JsonSerializer<AutoCNode> 
 				pos = pos,
 				yaw = obj.get("yaw")?.asFloat ?: 0.0f,
 				pitch = obj.get("pitch")?.asFloat ?: 0.0f,
+				activeForSeconds = readActiveFor(obj),
 				radius = radius
 			)
 			"strafe" -> StrafeNode(
 				pos = pos,
 				direction = AutoCStrafeDirection.parse(obj.get("direction")?.asString ?: "w") ?: AutoCStrafeDirection.W,
+				activeForSeconds = readActiveFor(obj),
 				radius = radius
 			)
 			"etherwarp" -> EtherwarpNode(
@@ -145,6 +148,7 @@ class AutoCNodeAdapter : JsonDeserializer<AutoCNode>, JsonSerializer<AutoCNode> 
 		node.onTerminalExit = obj.get("onTerminalExit")?.asBoolean
 			?: obj.get("terminalExit")?.asBoolean
 			?: false
+		node.onPhaseStart = readPhase(obj.get("onPhaseStart")?.asStringOrNull() ?: obj.get("phaseStart")?.asStringOrNull())
 		node.requiredNodeIds.clear()
 		node.requiredNodeIds.addAll(readRawStringSet(obj.get("requires") ?: obj.get("conditions")))
 		return node
@@ -164,6 +168,22 @@ class AutoCNodeAdapter : JsonDeserializer<AutoCNode>, JsonSerializer<AutoCNode> 
 			obj.get("z")?.asDouble ?: 0.0
 		)
 	}
+
+	private fun readActiveFor(obj: JsonObject): Double =
+		(obj.get("activeFor")?.asDouble ?: obj.get("activeForSeconds")?.asDouble ?: 0.0).coerceAtLeast(0.0)
+
+	private fun readPhase(value: String?): Phase7 =
+		when (value?.trim()?.lowercase(Locale.ROOT)) {
+			"p1" -> Phase7.P1
+			"p2" -> Phase7.P2
+			"s1" -> Phase7.S1
+			"s2" -> Phase7.S2
+			"s3" -> Phase7.S3
+			"s4" -> Phase7.S4
+			"p4" -> Phase7.P4
+			"5p", "p5" -> Phase7.P5
+			else -> Phase7.UNKNOWN
+		}
 
 	private fun readPosList(obj: JsonObject): MutableList<Pos> {
 		val array = obj.get("blocks")?.asJsonArray ?: return mutableListOf()

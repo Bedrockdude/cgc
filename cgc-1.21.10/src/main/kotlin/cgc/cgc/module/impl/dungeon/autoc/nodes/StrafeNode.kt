@@ -11,10 +11,11 @@ import net.minecraft.client.player.LocalPlayer
 class StrafeNode(
 	pos: Pos = Pos(),
 	private val direction: AutoCStrafeDirection = AutoCStrafeDirection.W,
+	var activeForSeconds: Double = 0.0,
 	radius: Float = AutoCNode.DEFAULT_RADIUS
 ) : AutoCNode(pos, radius) {
 	override fun run(player: LocalPlayer, playerPos: Pos, context: AutoCNodeContext): Boolean {
-		context.startStrafe(direction)
+		context.startStrafe(direction, activeForSeconds)
 		return true
 	}
 
@@ -30,6 +31,7 @@ class StrafeNode(
 	override fun serialize(): JsonObject {
 		val json = super.serialize()
 		json.addProperty("direction", direction.commandName)
+		json.addProperty("activeFor", activeForSeconds)
 		return json
 	}
 
