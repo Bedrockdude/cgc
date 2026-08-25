@@ -803,17 +803,34 @@ private class RsmStylePanel {
 		val boxY = row.y - 10
 		val focused = focusedString == setting
 		val text = if (setting.secure && !focused) "*".repeat(setting.value.length) else setting.value
-		drawInputBox(gfx, boxX, boxY, 200, 21, focused)
-		gfx.text(font(), fit(font(), text + if (focused) "|" else "", 188), boxX + 5, row.y - 2, Colours.TEXT, false)
-		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
+		val inputWidth = if (setting.pasteButton) 151 else 200
+		drawInputBox(gfx, boxX, boxY, inputWidth, 21, focused)
+		gfx.text(font(), fit(font(), text + if (focused) "|" else "", inputWidth - 12), boxX + 5, row.y - 2, Colours.TEXT, false)
+		hitboxes.add(Hitbox(boxX, boxY, inputWidth, 21) { button ->
 			if (button == 0) {
-				focusedString = setting
-				focusedSave = null
-				waitingKeybind = null
-				waitingHotbarSwapKey = null
-				writingSearch = false
+				focusString(setting)
 			}
 		})
+
+		if (setting.pasteButton) {
+			val pasteX = boxX + inputWidth + 4
+			drawInputBox(gfx, pasteX, boxY, 45, 21, false)
+			gfx.centeredText(font(), "Paste", pasteX + 22, row.y - 2, Colours.TEXT)
+			hitboxes.add(Hitbox(pasteX, boxY, 45, 21) { button ->
+				if (button == 0) {
+					setting.setText(Minecraft.getInstance().keyboardHandler.clipboard)
+					focusString(setting)
+				}
+			})
+		}
+	}
+
+	private fun focusString(setting: StringSetting) {
+		focusedString = setting
+		focusedSave = null
+		waitingKeybind = null
+		waitingHotbarSwapKey = null
+		writingSearch = false
 	}
 
 	private fun renderKeybind(gfx: GuiGraphicsExtractor, row: SettingRow, setting: KeybindSetting) {

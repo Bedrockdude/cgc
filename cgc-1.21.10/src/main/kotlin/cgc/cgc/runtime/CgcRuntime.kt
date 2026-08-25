@@ -5,7 +5,7 @@ import net.minecraft.network.protocol.Packet
 
 object CgcRuntime {
 	fun clientTickStart(client: Minecraft) {
-		PacketOrderManager.onTickStart()
+		PacketOrderManager.onTickStart(client)
 		MovementPlayback.tick(client)
 		InputScheduler.tick(client)
 	}
@@ -20,7 +20,6 @@ object CgcRuntime {
 		PacketOrderManager.onPacketReceive(packet)
 	}
 
-	fun packetSend(packet: Packet<*>) {
+	fun packetSend(packet: Packet<*>): Boolean =
 		PacketOrderManager.onPacketSend(packet)
-	}
 }

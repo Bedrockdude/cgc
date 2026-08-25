@@ -191,7 +191,9 @@ object CgcModules {
 	@JvmStatic
 	fun packetSend(packet: Packet<*>): Boolean =
 		run {
-			CgcRuntime.packetSend(packet)
+			if (CgcRuntime.packetSend(packet)) {
+				return@run true
+			}
 			manager.all()
 				.asSequence()
 				.filter { it.enabled }

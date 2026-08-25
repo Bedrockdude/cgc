@@ -2,9 +2,12 @@ package cgc.cgc.module.impl.render.opsec
 
 import cgc.cgc.module.SubModule
 import cgc.cgc.module.setting.StringSetting
+import com.google.gson.JsonParser
+import com.mojang.serialization.JsonOps
 import net.minecraft.client.Minecraft
 import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.ComponentContents
+import net.minecraft.network.chat.ComponentSerialization
 import net.minecraft.network.chat.MutableComponent
 import net.minecraft.network.chat.Style
 import net.minecraft.network.chat.contents.PlainTextContents
@@ -13,7 +16,15 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.regex.Pattern
 
 class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
-	private val fakeName = StringSetting("Name", "", allowBlank = true, maxLength = 64)
+	private val fakeName = StringSetting(
+		"Name",
+		"",
+		allowBlank = true,
+		maxLength = 8192,
+		pasteButton = true
+	)
+	private var cachedReplacementInput: String? = null
+	private var cachedReplacement: Component = Component.empty()
 
 	init {
 		instance = this
@@ -26,8 +37,14 @@ class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
 	private fun playerName(): String? =
 		Minecraft.getInstance().player?.name?.string
 
-	private fun replacement(): String =
-		fakeName.value
+	private fun replacement(): Component {
+		val input = fakeName.value
+		if (input != cachedReplacementInput) {
+			cachedReplacementInput = input
+			cachedReplacement = parseCustomName(input)
+		}
+		return cachedReplacement
+	}
 
 	companion object {
 		private var instance: NickHider? = null
@@ -44,7 +61,29 @@ class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
 				return text
 			}
 
-			return text.replace(playerName, hider.replacement())
+			return text.replace(playerName, hider.replacement().string)
+		}
+
+		/**
+		 * Returns a formatted replacement for a plain font string, or null when the
+		 * string does not need changing. The font mixin uses the nullable result to
+		 * switch to Minecraft's styled text rendering overload only when necessary.
+		 */
+		@JvmStatic
+		fun modifyStringAsCharSeq(text: String?): FormattedCharSequence? {
+			val hider = instance ?: return null
+			if (!hider.active() || text.isNullOrBlank()) {
+				return null
+			}
+
+			val playerName = hider.playerName()
+			if (playerName.isNullOrEmpty() || !text.contains(playerName)) {
+				return null
+			}
+
+			// Converting through visualOrderText first preserves legacy section-sign
+			// formatting in ordinary String draw calls before the name is replaced.
+			return modifyCharSeq(Component.literal(text).visualOrderText)
 		}
 
 		@JvmStatic
@@ -71,7 +110,7 @@ class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
 
 			val text = StringBuilder()
 			seq.accept { _, _, codePoint ->
-				text.append(codePoint.toChar())
+				text.appendCodePoint(codePoint)
 				true
 			}
 
@@ -89,15 +128,26 @@ class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
 					flushStyledBuffer(rebuilt, buffer, currentStyle.get())
 					currentStyle.set(style)
 				}
-				buffer.append(codePoint.toChar())
+				buffer.appendCodePoint(codePoint)
 				true
 			}
 
 			flushStyledBuffer(rebuilt, buffer, currentStyle.get())
-			return (modifyComponent(rebuilt) ?: rebuilt).visualOrderText
+			return rebuildComponent(rebuilt, playerName, hider.replacement()).visualOrderText
 		}
 
-		private fun rebuildComponent(component: Component, playerName: String, replacement: String): MutableComponent {
+		internal fun parseCustomName(input: String): Component {
+			val parsed = runCatching {
+				ComponentSerialization.CODEC
+					.parse(JsonOps.INSTANCE, JsonParser.parseString(input))
+					.result()
+					.orElse(null)
+			}.getOrNull()
+
+			return parsed ?: Component.literal(input)
+		}
+
+		private fun rebuildComponent(component: Component, playerName: String, replacement: Component): MutableComponent {
 			val contents: ComponentContents = component.contents
 			val rebuilt = if (contents is PlainTextContents && contents.text().contains(playerName)) {
 				injectReplacement(contents.text(), playerName, replacement, component.style)
@@ -118,7 +168,7 @@ class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
 			return rebuilt
 		}
 
-		private fun injectReplacement(text: String, target: String, replacement: String, style: Style): MutableComponent {
+		private fun injectReplacement(text: String, target: String, replacement: Component, style: Style): MutableComponent {
 			val root = Component.literal("")
 			val parts = text.split(Pattern.quote(target).toRegex(), limit = 2)
 
@@ -126,7 +176,7 @@ class NickHider(module: OpSec) : SubModule<OpSec>(module, "Nick Hider", true) {
 				root.append(Component.literal(parts[0]).withStyle(style))
 			}
 
-			root.append(Component.literal(replacement).withStyle(style))
+			root.append(Component.empty().withStyle(style).append(replacement.copy()))
 
 			if (parts.size > 1 && parts[1].isNotEmpty()) {
 				val remaining = parts[1]

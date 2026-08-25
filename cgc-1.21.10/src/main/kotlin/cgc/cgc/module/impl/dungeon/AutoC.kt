@@ -84,7 +84,6 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 
 class AutoC : CgcModule(
@@ -95,16 +94,27 @@ class AutoC : CgcModule(
 	defaultEnabled = false
 ), ClientTickStartModule, ClientTickModule, WorldRenderStartModule, WorldRenderExtractModule, ActionBarMessageModule, PacketReceiveModule, PacketSendModule, WorldLoadModule {
 	private val nodeListType = object : TypeToken<MutableList<AutoCNode>>() {}.type
+	private val floorRouteMapType = object : TypeToken<MutableMap<String, MutableList<AutoCNode>>>() {}.type
 	private val nodeGson = GsonBuilder()
 		.registerTypeHierarchyAdapter(AutoCNode::class.java, AutoCNodeAdapter())
 		.setPrettyPrinting()
 		.create()
 	private val dungeonFloorRoutes = BooleanSetting("Dungeon Floor", true)
 	private val bossFightRoutes = BooleanSetting("Boss Fight", true)
-	private val data = SaveSetting(
-		name = "Nodes",
-		path = "dungeon/auto_c",
-		defaultFile = "nodes.json",
+	private val dungeonFloorConfig = SaveSetting(
+		name = "Dungeon Floor Config",
+		path = "dungeon/auto_c/floor",
+		defaultFile = "default.json",
+		factory = { linkedMapOf<String, MutableList<AutoCNode>>() },
+		valueType = floorRouteMapType,
+		gson = nodeGson,
+		allowEdits = true,
+		action = this::reload
+	)
+	private val bossFightConfig = SaveSetting(
+		name = "Boss Fight Config",
+		path = "dungeon/auto_c/boss",
+		defaultFile = "default.json",
 		factory = { mutableListOf<AutoCNode>() },
 		valueType = nodeListType,
 		gson = nodeGson,
@@ -214,6 +224,7 @@ class AutoC : CgcModule(
 	private var routeWaitUntilMs = 0L
 	private var routeWaitUntilTick = 0
 	private var routeActive = false
+	private var routeInputBaseline: AutoCInputController.MovementInputBaseline? = null
 	private var awaitSecretNode: AutoCNode? = null
 	private var awaitSecretPendingNode: AutoCNode? = null
 	private val stackedNodeQueue = arrayListOf<AutoCNode>()
@@ -240,8 +251,9 @@ class AutoC : CgcModule(
 	private var lastPhaseStartSequence = 0L
 
 	init {
-		registerProperty(dungeonFloorRoutes, bossFightRoutes)
-		data.load()
+		registerProperty(dungeonFloorRoutes, dungeonFloorConfig, bossFightRoutes, bossFightConfig)
+		loadInitialBossConfig()
+		loadInitialFloorConfig()
 		reload()
 	}
 
@@ -945,11 +957,9 @@ class AutoC : CgcModule(
 	}
 
 	private fun loadRoomNodes(room: ScannedDungeonRoom): MutableList<AutoCNode> {
-		val file = roomFile(room)
-		if (!file.exists()) {
-			return mutableListOf()
-		}
-		return loadNodeFile(file, room.displayName)
+		return dungeonFloorConfig.value[room.key]
+			?.toMutableList()
+			?: mutableListOf()
 	}
 
 	private fun loadNodeFile(file: Path, label: String): MutableList<AutoCNode> =
@@ -984,22 +994,55 @@ class AutoC : CgcModule(
 	}
 
 	private fun saveRoomNodes(room: ScannedDungeonRoom) {
-		val file = roomFile(room)
-		file.parent?.createDirectories()
-		Files.newBufferedWriter(file, StandardCharsets.UTF_8).use { writer ->
-			nodeGson.toJson(roomNodes, nodeListType, writer)
-		}
+		dungeonFloorConfig.value[room.key] = roomNodes.toMutableList()
+		dungeonFloorConfig.save()
 	}
 
-	private fun roomFile(room: ScannedDungeonRoom): Path =
+	private fun legacyAutoCDirectory(): Path =
 		FabricLoader.getInstance()
 			.configDir
 			.resolve("cgc")
 			.resolve("dungeon")
 			.resolve("auto_c")
-			.resolve("rooms")
-			.resolve("${room.key}.json")
 			.normalize()
+
+	private fun loadInitialBossConfig() {
+		if (bossFightConfig.file.exists()) {
+			bossFightConfig.load()
+			return
+		}
+
+		val legacyFile = legacyAutoCDirectory().resolve("nodes.json")
+		bossFightConfig.value = if (legacyFile.exists()) {
+			loadNodeFile(legacyFile, "legacy boss")
+		} else {
+			mutableListOf()
+		}
+		bossFightConfig.save()
+	}
+
+	private fun loadInitialFloorConfig() {
+		if (dungeonFloorConfig.file.exists()) {
+			dungeonFloorConfig.load()
+			return
+		}
+
+		val migrated = linkedMapOf<String, MutableList<AutoCNode>>()
+		val legacyRooms = legacyAutoCDirectory().resolve("rooms")
+		if (Files.isDirectory(legacyRooms)) {
+			Files.list(legacyRooms).use { files ->
+				files
+					.filter { file -> Files.isRegularFile(file) && file.fileName.toString().endsWith(".json", ignoreCase = true) }
+					.sorted()
+					.forEach { file ->
+						val key = file.fileName.toString().substringBeforeLast('.')
+						migrated[key] = loadNodeFile(file, "legacy $key room")
+					}
+			}
+		}
+		dungeonFloorConfig.value = migrated
+		dungeonFloorConfig.save()
+	}
 
 	private fun armTerminalExitTrigger() {
 		if (terminalExitListenerArmed) {
@@ -1169,6 +1212,7 @@ class AutoC : CgcModule(
 		}
 		if (!routeActive) {
 			clearRouteActivationState()
+			routeInputBaseline = inputController.movementInputBaseline(Minecraft.getInstance())
 		}
 		routeActive = true
 		inNode = node
@@ -1204,6 +1248,10 @@ class AutoC : CgcModule(
 
 	private fun runAwaitSecretPendingNode(node: AutoCNode, player: LocalPlayer, playerPos: Pos): Boolean {
 		awaitSecretPendingNode = null
+		if (!routeActive) {
+			clearRouteActivationState()
+			routeInputBaseline = inputController.movementInputBaseline(Minecraft.getInstance())
+		}
 		routeActive = true
 		inNode = node
 		if (!canActivateByRules(node)) {
@@ -1258,6 +1306,7 @@ class AutoC : CgcModule(
 
 	private fun clearRouteActivationState() {
 		activatedNodeIds.clear()
+		routeInputBaseline = null
 	}
 
 	private fun hasBlockingSecretAwait(): Boolean =
@@ -1918,7 +1967,12 @@ class AutoC : CgcModule(
 	}
 
 	private fun updateRouteActiveState(client: Minecraft) {
-		if (routeActive && !hasActiveRouteWork() && inputController.anyMovementInputDown(client)) {
+		if (!routeActive || hasActiveRouteWork()) {
+			return
+		}
+		val baseline = routeInputBaseline
+			?: inputController.movementInputBaseline(client).also { routeInputBaseline = it }
+		if (inputController.movementInputDown(client, baseline)) {
 			routeActive = false
 			clearRouteActivationState()
 		}
@@ -3175,7 +3229,7 @@ class AutoC : CgcModule(
 	private fun reload() {
 		synchronized(nodes) {
 			globalNodes.clear()
-			globalNodes.addAll(data.value)
+			globalNodes.addAll(bossFightConfig.value)
 			globalNodes.forEach { it.calculate() }
 			activeScopeSignature = null
 		}
@@ -3184,8 +3238,8 @@ class AutoC : CgcModule(
 	}
 
 	private fun saveGlobal() {
-		data.value = synchronized(nodes) { globalNodes.toMutableList() }
-		data.save()
+		bossFightConfig.value = synchronized(nodes) { globalNodes.toMutableList() }
+		bossFightConfig.save()
 	}
 
 	private fun clearRuntime() {

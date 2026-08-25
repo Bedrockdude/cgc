@@ -42,7 +42,7 @@ class SaveSetting<T>(
 
 	fun setFileName(fileName: String) {
 		if (!allowEdits) return
-		this.fileName = fileName.ifBlank { defaultFile }
+		this.fileName = fileName
 		updateFile()
 	}
 
@@ -57,6 +57,7 @@ class SaveSetting<T>(
 	}
 
 	override fun saveToJson(obj: JsonObject) {
+		useDefaultFileNameIfBlank()
 		obj.addProperty("name", name)
 		obj.addProperty("type", type)
 		obj.addProperty("file", fileName)
@@ -64,6 +65,7 @@ class SaveSetting<T>(
 	}
 
 	fun save() {
+		useDefaultFileNameIfBlank()
 		updateFile()
 		file.parent?.createDirectories()
 		Files.newBufferedWriter(file, StandardCharsets.UTF_8).use { writer ->
@@ -72,6 +74,7 @@ class SaveSetting<T>(
 	}
 
 	fun load() {
+		useDefaultFileNameIfBlank()
 		updateFile()
 		if (!file.exists()) {
 			value = factory()
@@ -89,13 +92,19 @@ class SaveSetting<T>(
 	override val type: String = "save"
 
 	override val displayValue: String
-		get() = "$fileName.$ext"
+		get() = "${fileName.ifBlank { defaultFile }}.$ext"
+
+	private fun useDefaultFileNameIfBlank() {
+		if (fileName.isBlank()) {
+			fileName = defaultFile
+		}
+	}
 
 	private fun resolveFile(): Path =
 		FabricLoader.getInstance()
 			.configDir
 			.resolve("cgc")
 			.resolve(path)
-			.resolve("$fileName.$ext")
+			.resolve("${fileName.ifBlank { defaultFile }}.$ext")
 			.normalize()
 }

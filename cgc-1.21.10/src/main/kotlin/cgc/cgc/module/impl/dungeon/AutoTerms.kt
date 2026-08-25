@@ -8,7 +8,6 @@ import cgc.cgc.module.ClientTickModule
 import cgc.cgc.module.ModuleCategory
 import cgc.cgc.module.PacketSendModule
 import cgc.cgc.module.WorldLoadModule
-import cgc.cgc.module.WorldRenderStartModule
 import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.MultiBoolSetting
@@ -39,7 +38,7 @@ class AutoTerms : CgcModule(
 	category = ModuleCategory.DUNGEONS,
 	description = "Automatically clicks known F7 terminal solutions.",
 	defaultEnabled = false
-), ClientTickModule, WorldRenderStartModule, PacketSendModule, WorldLoadModule {
+), ClientTickModule, PacketSendModule, WorldLoadModule {
 	private val skyblock = ModeSetting("Skyblock", "Auto", listOf("Auto", "Dungeon", "Skyblock", "Practice"))
 	private val terminals = MultiBoolSetting(
 		"Terminals",
@@ -115,19 +114,9 @@ class AutoTerms : CgcModule(
 		recoverStaleAutoClick(now, current)
 		if (current.type == TerminalType.MELODY) {
 			tickMelody(now)
+		} else {
+			tickStandardTerminal(now, current)
 		}
-	}
-
-	override fun onWorldRenderStart() {
-		val current = session ?: return
-		if (current.type == TerminalType.MELODY || terminalContainer == null) {
-			return
-		}
-		if (!hasTerminalScreenOpen()) {
-			close()
-			return
-		}
-		tickStandardTerminal(System.currentTimeMillis(), current)
 	}
 
 	private fun tickStandardTerminal(now: Long, current: TerminalSession) {
@@ -412,7 +401,7 @@ class AutoTerms : CgcModule(
 			return
 		}
 
-		melodyQueue.add(SolutionClick(ContainerInput.CLONE, baseSlot, 0))
+		melodyQueue.add(SolutionClick(ContainerInput.CLONE, baseSlot, MIDDLE_MOUSE_BUTTON))
 		lastMelodyClickState = state
 	}
 
@@ -585,7 +574,7 @@ class AutoTerms : CgcModule(
 			?.filter { !clickedSlots.contains(it.index) }
 			?.filter { it.item.`is`(Items.RED_STAINED_GLASS_PANE) }
 			?.sortedBy { it.item.count }
-			?.map { SolutionClick(ContainerInput.CLONE, it.index, 0) }
+			?.map { SolutionClick(ContainerInput.CLONE, it.index, MIDDLE_MOUSE_BUTTON) }
 			?.toList()
 			.orEmpty()
 
@@ -595,7 +584,7 @@ class AutoTerms : CgcModule(
 			?.filter { it.index in 0 until TerminalType.RED_GREEN.slotCount }
 			?.filter { !clickedSlots.contains(it.index) }
 			?.filter { !it.item.isEmpty && it.item.`is`(Items.RED_STAINED_GLASS_PANE) }
-			?.map { SolutionClick(ContainerInput.CLONE, it.index, 0) }
+			?.map { SolutionClick(ContainerInput.CLONE, it.index, MIDDLE_MOUSE_BUTTON) }
 			?.toList()
 			.orEmpty()
 
@@ -612,7 +601,7 @@ class AutoTerms : CgcModule(
 			?.filter { !it.item.isEmpty && !clickedSlots.contains(it.index) }
 			?.filter { !it.item.`is`(Items.BLACK_STAINED_GLASS_PANE) && !it.item.hasFoil() }
 			?.filter { fixedColorItemName(ChatFormatting.stripFormatting(it.item.hoverName.string)?.lowercase(Locale.ROOT).orEmpty()).startsWith(color) }
-			?.map { SolutionClick(ContainerInput.CLONE, it.index, 0) }
+			?.map { SolutionClick(ContainerInput.CLONE, it.index, MIDDLE_MOUSE_BUTTON) }
 			?.toList()
 			.orEmpty()
 	}
@@ -630,7 +619,7 @@ class AutoTerms : CgcModule(
 			?.filter { !it.item.isEmpty && !clickedSlots.contains(it.index) }
 			?.filter { !it.item.hasFoil() }
 			?.filter { (ChatFormatting.stripFormatting(it.item.hoverName.string) ?: "").lowercase(Locale.ROOT).startsWith(prefix) }
-			?.map { SolutionClick(ContainerInput.CLONE, it.index, 0) }
+			?.map { SolutionClick(ContainerInput.CLONE, it.index, MIDDLE_MOUSE_BUTTON) }
 			?.toList()
 			.orEmpty()
 	}
@@ -806,6 +795,7 @@ class AutoTerms : CgcModule(
 
 	companion object {
 		private var instance: AutoTerms? = null
+		private const val MIDDLE_MOUSE_BUTTON = 2
 		private const val HUMAN_NEIGHBOR_RADIUS_SQUARED = 400
 		private const val STALE_CLICK_GRACE_MS = 50L
 		private const val MANUAL_CLOSE_SUPPRESS_MS = 750L

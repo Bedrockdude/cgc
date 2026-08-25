@@ -9,4 +9,3 @@ Auto puzzles
 
 
 Hotbar switcher (Issues (Don't get banned))
-

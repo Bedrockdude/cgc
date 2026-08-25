@@ -40,13 +40,8 @@ class AutoCInputController {
 		MovementInputBaseline(physicalMovementKeys(client).toMutableSet())
 
 	fun movementInputDown(client: Minecraft, baseline: MovementInputBaseline): Boolean {
-		val current = physicalMovementKeys(client)
-		baseline.ignoredHeld.retainAll(current)
-		return current.any { it !in baseline.ignoredHeld }
+		return baseline.hasNewInput(physicalMovementKeys(client))
 	}
-
-	fun anyMovementInputDown(client: Minecraft): Boolean =
-		physicalMovementKeys(client).isNotEmpty()
 
 	private fun physicalMovementKeys(client: Minecraft): Set<String> =
 		movementKeys(client)
@@ -78,5 +73,10 @@ class AutoCInputController {
 
 	data class MovementInputBaseline(
 		internal val ignoredHeld: MutableSet<String>
-	)
+	) {
+		internal fun hasNewInput(current: Set<String>): Boolean {
+			ignoredHeld.retainAll(current)
+			return current.any { it !in ignoredHeld }
+		}
+	}
 }

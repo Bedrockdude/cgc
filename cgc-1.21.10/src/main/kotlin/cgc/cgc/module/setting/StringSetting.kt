@@ -8,6 +8,7 @@ class StringSetting(
 	val allowBlank: Boolean = true,
 	val secure: Boolean = false,
 	val maxLength: Int = 32,
+	val pasteButton: Boolean = false,
 	onEdit: (() -> Unit)? = null,
 	supplier: (() -> Boolean)? = null
 ) : Setting<String>(name, supplier, onEdit) {

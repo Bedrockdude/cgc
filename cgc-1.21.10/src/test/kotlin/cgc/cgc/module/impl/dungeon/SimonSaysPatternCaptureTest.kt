@@ -3,9 +3,7 @@ package cgc.cgc.module.impl.dungeon
 import net.minecraft.core.BlockPos
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertIs
-import kotlin.test.assertTrue
 
 class SimonSaysPatternCaptureTest {
 	private val first = BlockPos(110, 120, 92)
@@ -13,16 +11,18 @@ class SimonSaysPatternCaptureTest {
 	private val third = BlockPos(110, 122, 94)
 
 	@Test
-	fun `opening capture keeps the newest inferred sequence`() {
+	fun `opening skip waits for all three transitions and discards the first`() {
 		val capture = SimonSaysPatternCapture(5)
 		capture.record(first)
-		capture.record(first)
 		capture.record(second)
-		capture.record(first)
-		capture.record(second)
+
+		assertEquals(null, capture.openingSkipPattern())
+		assertEquals(second, capture.openingSkipFirstCandidate())
+
 		capture.record(third)
 
-		assertEquals(listOf(first, second, third), capture.openingPattern())
+		assertEquals(listOf(second, third), capture.openingSkipPattern())
+		assertEquals(second, capture.openingSkipFirstCandidate())
 	}
 
 	@Test
@@ -37,14 +37,24 @@ class SimonSaysPatternCaptureTest {
 	}
 
 	@Test
-	fun `consecutive duplicate block observations are ignored`() {
+	fun `replay preserves a consecutive repeated button`() {
+		val capture = SimonSaysPatternCapture(5)
+		capture.record(first)
+		capture.record(first)
+
+		val result = assertIs<PatternReplayResult.Ready>(capture.nextPattern(listOf(first)))
+		assertEquals(listOf(first, first), result.buttons)
+	}
+
+	@Test
+	fun `consecutive repeated buttons remain distinct light transitions`() {
 		val capture = SimonSaysPatternCapture(5)
 
-		assertTrue(capture.record(first))
-		assertFalse(capture.record(first))
-		assertTrue(capture.record(second))
-		assertEquals(2, capture.observationCount)
-		assertIs<PatternReplayResult.Ready>(capture.nextPattern(listOf(first)))
+		capture.record(first)
+		capture.record(first)
+		capture.record(second)
+		assertEquals(3, capture.observationCount)
+		assertEquals(listOf(first, second), capture.openingSkipPattern())
 	}
 
 	@Test

@@ -23,8 +23,8 @@ import cgc.cgc.module.setting.ColourSetting
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.runtime.CgcRenderPrimitives
+import cgc.cgc.runtime.PacketOrderManager
 import cgc.cgc.utils.DungeonUtils
-import cgc.cgc.mixin.MinecraftAccessor
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
@@ -38,7 +38,9 @@ import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket
 import net.minecraft.network.protocol.game.ClientboundBundlePacket
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket
 import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket
+import net.minecraft.network.protocol.game.ServerboundUseItemPacket
 import net.minecraft.util.Mth
+import net.minecraft.world.InteractionHand
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.block.Blocks
 import net.minecraft.world.level.block.ButtonBlock
@@ -48,6 +50,8 @@ import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
 import net.minecraft.world.phys.shapes.VoxelShape
+import net.fabricmc.loader.api.FabricLoader
+import java.util.Locale
 import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.max
 import kotlin.math.min
@@ -79,6 +83,7 @@ class AutoSSSpecsafe : CgcModule(
 	private val patternCapture = SimonSaysPatternCapture(FINAL_SEQUENCE_LENGTH)
 	private val aimController = SimonSaysAimController()
 	private val mouseMotion = VanillaMouseMotion()
+	private val debugRecorder = AutoSSDebugRecorder()
 
 	private var lastClickTime = nowMs()
 	private var currentClickDelayMs = randomClickDelayMs()
@@ -116,8 +121,9 @@ class AutoSSSpecsafe : CgcModule(
 	private var previousGridMotion: GridMotion? = null
 	private var latestAimResult: AimUpdateResult? = null
 	private var pendingClick: PendingClick? = null
-	private var clickPacketCaptureTarget: BlockPos? = null
+	private var clickPacketIntent: ClickIntent? = null
 	private var capturedClickPacketSequence: Int? = null
+	private var clickPacketRejectionReason: String? = null
 	private var smoothedInteractionAckMs = 0L
 	private var lastServerGameTime: Long? = null
 	private var lastServerTimePacketAtMs = 0L
@@ -142,19 +148,22 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	override fun onClientTick(client: Minecraft) {
+		val now = nowMs()
+		observeDebugTick(client, now)
 		if (!areaCheck() || client.player == null || client.level == null) {
+			saveDebugFailure("The dungeon area, player, or world became unavailable while Auto SS was running.", client, now)
 			clearAutoRestart()
 			clearTarget()
 			return
 		}
 
-		val now = nowMs()
+		reportDebugStallIfNeeded(client, now)
 		if (tickAutoRestart(now)) {
 			return
 		}
-		// The vanilla acknowledgement is emitted after the server processes the
-		// interaction sequence. Aim may continue, but never queue another SS click
-		// ahead of that acknowledgement.
+		// Solve clicks wait for the vanilla acknowledgement before logical state
+		// advances. Startup is intentionally separate: the SS skip requires the
+		// reference solver's fixed three-tick cadence rather than ping-gated clicks.
 		val pending = pendingClick
 		if (pending != null) {
 			if (now - pending.sentAtMs >= pendingClickTimeoutMs()) {
@@ -285,6 +294,7 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	override fun onWorldLoad() {
+		saveDebugFailure("The world changed before Auto SS completed.")
 		resetState()
 		resetServerTiming()
 	}
@@ -298,14 +308,18 @@ class AutoSSSpecsafe : CgcModule(
 	private fun handleChatMessage(message: String) {
 		if (areaCheck() && autoStart.value && Minecraft.getInstance().player != null) {
 			if (message == "[BOSS] Goldor: Who dares trespass into my domain?") {
-				start()
+				start("boss_chat")
 			}
 		}
-		handlePossibleSimonSaysFailure(message)
+		debugEvent("chat_message", stripControlCodes(message))
+		handlePossibleSimonSaysFailure(message, "chat")
 	}
 
 	override fun onActionBarMessage(message: String) {
-		runOnClientThread { handlePossibleSimonSaysFailure(message) }
+		runOnClientThread {
+			debugEvent("action_bar_message", stripControlCodes(message))
+			handlePossibleSimonSaysFailure(message, "action_bar")
+		}
 	}
 
 	override fun onBlockChange(pos: BlockPos, oldState: BlockState?, newState: BlockState) {
@@ -315,13 +329,41 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	override fun onPacketSend(packet: Packet<*>): Boolean {
-		val captureTarget = clickPacketCaptureTarget
-		if (captureTarget != null
-			&& packet is ServerboundUseItemOnPacket
-			&& packet.hitResult.blockPos == captureTarget
-		) {
-			capturedClickPacketSequence = packet.sequence
+		val intent = clickPacketIntent ?: return false
+		if (packet is ServerboundUseItemPacket) {
+			val rejection = "vanilla emitted an item-use packet instead of a block interaction"
+			clickPacketRejectionReason = rejection
+			debugEvent(
+				"click_packet_blocked",
+				"button=${debugPos(intent.button)} start_button=${intent.startButton} solve_index=${intent.solveIndex} reason=$rejection"
+			)
+			return true
 		}
+		if (packet !is ServerboundUseItemOnPacket) {
+			return false
+		}
+
+		val actualButton = packet.hitResult.blockPos
+		val rejection = when {
+			actualButton != intent.button ->
+				"outgoing packet targeted ${debugPos(actualButton)} instead of ${debugPos(intent.button)}"
+			else -> validateLogicalClickIntent(Minecraft.getInstance(), intent)
+		}
+		if (rejection != null) {
+			clickPacketRejectionReason = rejection
+			debugEvent(
+				"click_packet_blocked",
+				"button=${debugPos(intent.button)} start_button=${intent.startButton} solve_index=${intent.solveIndex} reason=$rejection packet_hit=${debugHit(packet.hitResult)}"
+			)
+			return true
+		}
+
+		capturedClickPacketSequence = packet.sequence
+		debugEvent(
+			"click_packet_captured",
+			"button=${debugPos(intent.button)} sequence=${packet.sequence} packet_hit=${debugHit(packet.hitResult)}",
+			progress = true
+		)
 		return false
 	}
 
@@ -371,10 +413,13 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		val button = BlockPos(110, pos.y, pos.z)
-		if (!patternCapture.record(button)) {
-			return
-		}
+		patternCapture.record(button)
 		markPatternChanged()
+		debugEvent(
+			"pattern_light_recorded",
+			"light=${debugPos(pos)} old=$oldState new=$newState button=${debugPos(button)} observation=${patternCapture.observationCount} observations=${debugPattern(patternCapture.observations())} settle_in_ms=${(patternSettledAt - nowMs()).coerceAtLeast(0L)}",
+			progress = true
+		)
 		if (startClicksRemaining > 0) {
 			return
 		}
@@ -399,11 +444,15 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		val capturedPattern = if (!doneFirst) {
-			patternCapture.openingPattern()
+			patternCapture.openingSkipPattern()
 		} else {
 			when (val replay = patternCapture.nextPattern(clicks)) {
 				PatternReplayResult.Incomplete -> return false
 				PatternReplayResult.Mismatch -> {
+					debugEvent(
+						"pattern_mismatch",
+						"expected=${debugPattern(clicks)} observations=${debugPattern(patternCapture.observations())}"
+					)
 					stopSimonSaysSafely("Auto SS stopped: the displayed pattern did not match the previous round.")
 					return false
 				}
@@ -419,6 +468,12 @@ class AutoSSSpecsafe : CgcModule(
 		doneFirst = true
 		patternCapture.clear()
 		patternSettledAt = 0L
+		debugEvent(
+			"pattern_committed",
+			"length=${clicks.size} buttons=${debugPattern(clicks)}",
+			progress = true,
+			now = now
+		)
 		return true
 	}
 
@@ -434,7 +489,7 @@ class AutoSSSpecsafe : CgcModule(
 
 	fun SSR() {
 		if (areaCheck()) {
-			start()
+			start("reset_key")
 		}
 	}
 
@@ -445,29 +500,42 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	override fun onDisable() {
+		saveDebugFailure("The Auto SS module was disabled before the run completed.")
 		resetKey.unregister()
 		resetState()
 		resetServerTiming()
 	}
 
 	override fun reset() {
+		saveDebugFailure("The Auto SS module state was reset before the run completed.")
 		resetState()
 	}
 
-	private fun start() {
+	private fun start(trigger: String) {
 		val client = Minecraft.getInstance()
 		val player = client.player
 		if (player == null || client.level == null || player.distanceToSqr(START_BUTTON) > 25.0) {
 			return
 		}
 
+		if (debugRecorder.isActive) {
+			saveDebugFailure("A new Auto SS run started before the previous run completed.", client)
+		}
 		allButtons.clear()
-		chat("Starting spectator safe SS!")
 		resetState()
 		doingSS = true
 		startAimPoint = getAimPoint(client.level!!, startButtonPos())
 		startClicksRemaining = 3
-		nextStartClickAt = nowMs() + randomAutoStartDelayMs()
+		val startedAt = nowMs()
+		nextStartClickAt = startedAt + randomAutoStartDelayMs()
+		beginDebugSession(client, trigger, startedAt)
+		debugEvent(
+			"start_clicks_scheduled",
+			"remaining=$startClicksRemaining first_click_in_ms=${(nextStartClickAt - startedAt).coerceAtLeast(0L)}",
+			progress = true,
+			now = startedAt
+		)
+		chat("Starting spectator safe SS!")
 	}
 
 	private fun tickTarget(client: Minecraft) {
@@ -572,6 +640,15 @@ class AutoSSSpecsafe : CgcModule(
 	) {
 		latestAimResult = null
 		aimController.start(player, target, getAimSettings(mode), mode, moveContext)
+		val plan = aimController.currentPlan()
+		if (plan != null) {
+			debugEvent(
+				"aim_started",
+				"mode=$mode target=${debugVec(target)} start=${debugRotation(plan.start)} final=${debugRotation(plan.final)} distance_deg=${debugDouble(plan.angularDistance)} duration_ms=${plan.durationMs} seed=${plan.seed} move_context=${moveContext ?: "none"}",
+				progress = true,
+				now = plan.startedAtMs
+			)
+		}
 	}
 
 	private fun angularError(rotation: Rotation, target: Rotation): Double {
@@ -735,41 +812,81 @@ class AutoSSSpecsafe : CgcModule(
 
 		val button = targetButton ?: return false
 		val clickedStart = targetIsStart
-		val packetSequence = when (val sendResult = sendClickInteraction(client, button, allowPowered = clickedStart)) {
-			ClickSendResult.NotReady -> return false
+		val solveIndex = if (clickedStart) -1 else state
+		val packetSequence = when (
+			val sendResult = sendClickInteraction(
+				client = client,
+				intent = ClickIntent(button, clickedStart, solveIndex),
+				allowPowered = clickedStart
+			)
+		) {
+			is ClickSendResult.NotReady -> {
+				debugEvent(
+					"click_not_sent",
+					"button=${debugPos(button)} start_button=$clickedStart reason=${sendResult.reason}"
+				)
+				return false
+			}
+			is ClickSendResult.GuardRejected -> {
+				debugEvent(
+					"click_guard_rejected",
+					"button=${debugPos(button)} start_button=$clickedStart solve_index=$solveIndex reason=${sendResult.reason}"
+				)
+				clearTarget()
+				return true
+			}
 			ClickSendResult.LocallySuppressed -> {
-				stopSimonSaysSafely("Auto SS stopped: another mod blocked its click before it was sent.")
+				debugEvent(
+					"click_locally_suppressed",
+					"button=${debugPos(button)} start_button=$clickedStart no matching outgoing interaction packet was observed"
+				)
+				stopSimonSaysSafely("Auto SS stopped: its verified click did not produce an outgoing block-interaction packet.")
 				return true
 			}
 			is ClickSendResult.Sent -> sendResult.packetSequence
 		}
 
 		val sentAt = nowMs()
-		recordClickAttempt(button, sentAt)
+		recordClickAttempt(button, sentAt, clickedStart)
 		if (clickedStart) {
 			startClicksRemaining = max(0, startClicksRemaining - 1)
 			nextStartClickAt = if (startClicksRemaining > 0) {
-				sentAt + randomStartClickDelayMs()
+				sentAt + START_CLICK_INTERVAL_MS
 			} else {
 				0L
 			}
+			debugEvent(
+				"start_click_sent",
+				"button=${debugPos(button)} sequence=$packetSequence remaining=$startClicksRemaining next_click_in_ms=${(nextStartClickAt - sentAt).coerceAtLeast(0L)}",
+				progress = true,
+				now = sentAt
+			)
+			clearTarget()
+			if (startClicksRemaining <= 0) {
+				scheduleOpeningPreAim()
+			}
+			return true
 		}
 
 		val pending = PendingClick(
 			button = button,
-			startButton = clickedStart,
-			solveIndex = if (clickedStart) -1 else state,
+			solveIndex = solveIndex,
 			packetSequence = packetSequence,
 			sentAtMs = sentAt
 		)
 		pendingClick = pending
+		debugEvent(
+			"click_pending",
+			"button=${debugPos(button)} start_button=$clickedStart solve_index=${pending.solveIndex} packet_sequence=$packetSequence timeout_ms=${pendingClickTimeoutMs()}",
+			progress = true,
+			now = sentAt
+		)
 		beginMotionWhileClickPending(client, pending)
 		return true
 	}
 
 	private fun beginMotionWhileClickPending(client: Minecraft, pending: PendingClick) {
-		if (pending.startButton
-			|| !doingSS
+		if (!doingSS
 			|| pending.solveIndex !in clicks.indices
 			|| clicks[pending.solveIndex] != pending.button
 		) {
@@ -791,50 +908,184 @@ class AutoSSSpecsafe : CgcModule(
 		beginFirstButtonPreAim(client)
 	}
 
-	private fun sendClickInteraction(client: Minecraft, button: BlockPos, allowPowered: Boolean = false): ClickSendResult {
-		val player = client.player ?: return ClickSendResult.NotReady
-		val level = client.level ?: return ClickSendResult.NotReady
-		val gameMode = client.gameMode ?: return ClickSendResult.NotReady
-		if (nowMs() < nextServerSafeClickAtMs) {
-			return ClickSendResult.NotReady
+	private fun validateLogicalClickIntent(client: Minecraft, intent: ClickIntent): String? {
+		val level = client.level ?: return "world unavailable during logical verification"
+		if (!doingSS) {
+			return "solver is no longer running"
 		}
-		if (client.screen != null || !client.mouseHandler.isMouseGrabbed || gameMode.isDestroying || player.isHandsBusy) {
-			return ClickSendResult.NotReady
+		if (!areaCheck()) {
+			return "player is no longer in the Simon Says area"
+		}
+		if (targetButton != intent.button || targetIsStart != intent.startButton) {
+			return "active target changed before packet emission"
+		}
+
+		if (intent.startButton) {
+			if (intent.button != startButtonPos() || intent.solveIndex != -1) {
+				return "invalid start-button intent"
+			}
+			if (startClicksRemaining <= 0) {
+				return "all scheduled start clicks were already emitted"
+			}
+			if (pendingClick != null) {
+				return "a solve click is still awaiting acknowledgement"
+			}
+			return null
+		}
+
+		if (startClicksRemaining > 0) {
+			return "$startClicksRemaining start clicks remain"
+		}
+		if (!doneFirst) {
+			return "opening SS-skip pattern is not committed"
+		}
+		if (pendingClick != null) {
+			return "another solve click is still awaiting acknowledgement"
+		}
+		if (state != intent.solveIndex) {
+			return "solve index changed from ${intent.solveIndex} to $state"
+		}
+		val expected = clicks.getOrNull(state)
+			?: return "captured pattern has no button at solve index $state"
+		if (expected != intent.button) {
+			return "captured pattern expects ${debugPos(expected)} at index $state, not ${debugPos(intent.button)}"
+		}
+		if (patternCapture.observationCount > 0) {
+			return "a newer pattern is still being captured: ${debugPattern(patternCapture.observations())}"
+		}
+		if (nowMs() < patternSettledAt) {
+			return "pattern capture has not settled"
+		}
+		if (!level.getBlockState(DETECT).`is`(Blocks.STONE_BUTTON)) {
+			return "input-phase marker is not a stone button"
+		}
+		val missingButtons = INPUT_BUTTONS.filterNot { level.getBlockState(it).`is`(Blocks.STONE_BUTTON) }
+		if (missingButtons.isNotEmpty()) {
+			return "input grid is incomplete (${missingButtons.size} buttons unavailable)"
+		}
+		return null
+	}
+
+	private fun sendClickInteraction(
+		client: Minecraft,
+		intent: ClickIntent,
+		allowPowered: Boolean = false
+	): ClickSendResult {
+		val button = intent.button
+		val player = client.player ?: return ClickSendResult.NotReady("player unavailable")
+		val level = client.level ?: return ClickSendResult.NotReady("world unavailable")
+		val gameMode = client.gameMode ?: return ClickSendResult.NotReady("game mode unavailable")
+		val now = nowMs()
+		if (now < nextServerSafeClickAtMs) {
+			return ClickSendResult.NotReady("server-safe spacing has ${(nextServerSafeClickAtMs - now).coerceAtLeast(0L)}ms remaining")
+		}
+		if (client.screen != null) {
+			return ClickSendResult.NotReady("screen open: ${client.screen?.javaClass?.simpleName}")
+		}
+		if (!client.mouseHandler.isMouseGrabbed) {
+			return ClickSendResult.NotReady("mouse is not grabbed")
+		}
+		if (gameMode.isDestroying) {
+			return ClickSendResult.NotReady("player is destroying a block")
+		}
+		if (player.isHandsBusy) {
+			return ClickSendResult.NotReady("player hands are busy")
+		}
+		if (!intent.startButton) {
+			if (patternCapture.observationCount > 0 || now < patternSettledAt) {
+				return ClickSendResult.NotReady("pattern capture is still changing")
+			}
+			if (!level.getBlockState(DETECT).`is`(Blocks.STONE_BUTTON)) {
+				return ClickSendResult.NotReady("input-phase marker is not a stone button")
+			}
+			val unavailableCount = INPUT_BUTTONS.count { !level.getBlockState(it).`is`(Blocks.STONE_BUTTON) }
+			if (unavailableCount > 0) {
+				return ClickSendResult.NotReady("input grid is incomplete ($unavailableCount buttons unavailable)")
+			}
+		}
+		validateLogicalClickIntent(client, intent)?.let {
+			return ClickSendResult.GuardRejected(it)
 		}
 
 		val buttonState = level.getBlockState(button)
-		if (!buttonState.`is`(Blocks.STONE_BUTTON) || !allowPowered && isPressedStoneButton(buttonState)) {
-			return ClickSendResult.NotReady
+		if (!buttonState.`is`(Blocks.STONE_BUTTON)) {
+			return ClickSendResult.NotReady("target block is not a stone button: $buttonState")
 		}
-		if (player.distanceToSqr(Vec3.atCenterOf(button)) > MAX_BUTTON_DISTANCE_SQ) {
-			return ClickSendResult.NotReady
+		if (!allowPowered && isPressedStoneButton(buttonState)) {
+			return ClickSendResult.NotReady("target stone button is already powered")
 		}
-		if (getVerifiedClickHit(client, button) == null) {
-			return ClickSendResult.NotReady
+		val distanceSq = player.distanceToSqr(Vec3.atCenterOf(button))
+		if (distanceSq > MAX_BUTTON_DISTANCE_SQ) {
+			return ClickSendResult.NotReady("target distance squared ${debugDouble(distanceSq)} exceeds $MAX_BUTTON_DISTANCE_SQ")
 		}
+		val verifiedHit = getVerifiedClickHit(client, button)
+		if (verifiedHit == null) {
+			val freshHit = getLookHit(client, button)
+			val crosshairHit = client.hitResult as? BlockHitResult
+			return ClickSendResult.NotReady(
+				"click ray verification failed; fresh_hit=${freshHit?.let(::debugHit) ?: "none"}; crosshair_hit=${crosshairHit?.let(::debugHit) ?: client.hitResult?.type ?: "none"}"
+			)
+		}
+		debugEvent(
+			"click_preflight_verified",
+			"button=${debugPos(button)} allow_powered=$allowPowered distance_sq=${debugDouble(distanceSq)} " +
+				"verified_hit=${debugHit(verifiedHit)} crosshair_hit=${debugHit(client.hitResult)} " +
+				"selected_slot=${player.inventory.selectedSlot} main_hand=${player.mainHandItem}"
+		)
 
-		clickPacketCaptureTarget = button
+		clickPacketIntent = intent
 		capturedClickPacketSequence = null
+		clickPacketRejectionReason = null
+		var localInteractionResult = "not_dispatched"
+		var immediateSlotAcquired = false
 		try {
-			(client as MinecraftAccessor).cgcStartUseItem()
+			immediateSlotAcquired = PacketOrderManager.tryRunProtectedActionImmediately {
+				// Dispatch the exact hit that passed both ray checks. Minecraft.startUseItem()
+				// reads Minecraft.hitResult again, allowing a mutable/stale crosshair result
+				// (or another interaction hook) to turn this into an air/item use instead.
+				val result = gameMode.useItemOn(player, InteractionHand.MAIN_HAND, verifiedHit)
+				localInteractionResult = "${result.javaClass.simpleName}(consumes_action=${result.consumesAction()})"
+				player.swing(InteractionHand.MAIN_HAND)
+			}
 		} finally {
-			clickPacketCaptureTarget = null
+			clickPacketIntent = null
+		}
+		if (!immediateSlotAcquired) {
+			capturedClickPacketSequence = null
+			clickPacketRejectionReason = null
+			return ClickSendResult.NotReady("CGC protected-action slot is busy for this client tick")
 		}
 		val packetSequence = capturedClickPacketSequence
+		val rejectionReason = clickPacketRejectionReason
 		capturedClickPacketSequence = null
+		clickPacketRejectionReason = null
+		if (rejectionReason != null) {
+			return ClickSendResult.GuardRejected(rejectionReason)
+		}
 		return if (packetSequence == null) {
+			debugEvent(
+				"click_dispatch_suppressed",
+				"button=${debugPos(button)} verified_hit=${debugHit(verifiedHit)} local_result=$localInteractionResult " +
+					"selected_slot=${player.inventory.selectedSlot} main_hand=${player.mainHandItem}"
+			)
 			ClickSendResult.LocallySuppressed
 		} else {
 			ClickSendResult.Sent(packetSequence)
 		}
 	}
 
-	private fun recordClickAttempt(button: BlockPos, sentAt: Long) {
+	private fun recordClickAttempt(button: BlockPos, sentAt: Long, startButton: Boolean) {
 		clearAutoRestart()
 		lastClickTime = sentAt
 		currentClickDelayMs = randomClickDelayMs()
-		nextServerSafeClickAtMs = sentAt + randomServerSafeClickSpacingMs()
+		nextServerSafeClickAtMs = sentAt + if (startButton) START_CLICK_INTERVAL_MS else randomServerSafeClickSpacingMs()
 		clickedButton = Vec3.atLowerCornerOf(button)
+		debugEvent(
+			"click_attempt_recorded",
+			"button=${debugPos(button)} click_delay_ms=$currentClickDelayMs server_safe_spacing_ms=${(nextServerSafeClickAtMs - sentAt).coerceAtLeast(0L)}",
+			progress = true,
+			now = sentAt
+		)
 	}
 
 	private fun acknowledgePendingClickFromPrediction(acknowledgedSequence: Int) {
@@ -842,10 +1093,30 @@ class AutoSSSpecsafe : CgcModule(
 		// Acknowledgements are cumulative, so a newer sequence also proves this
 		// click has crossed a server processing boundary.
 		if (acknowledgedSequence < pending.packetSequence) {
+			debugEvent(
+				"click_ack_ignored",
+				"acknowledged_sequence=$acknowledgedSequence pending_sequence=${pending.packetSequence} reason=older_sequence"
+			)
+			return
+		}
+		val targetState = Minecraft.getInstance().level?.getBlockState(pending.button)
+		if (pending.solveIndex < clicks.lastIndex && targetState?.`is`(Blocks.STONE_BUTTON) != true) {
+			debugEvent(
+				"click_prediction_ack_not_confirming",
+				"button=${debugPos(pending.button)} pending_sequence=${pending.packetSequence} acknowledged_sequence=$acknowledgedSequence target_state=${targetState ?: "unavailable"} reason=intermediate_button_disappeared"
+			)
 			return
 		}
 
-		observeInteractionAck(nowMs() - pending.sentAtMs)
+		val acknowledgedAt = nowMs()
+		val latencyMs = (acknowledgedAt - pending.sentAtMs).coerceAtLeast(0L)
+		debugEvent(
+			"click_acknowledged",
+			"source=prediction_ack button=${debugPos(pending.button)} pending_sequence=${pending.packetSequence} acknowledged_sequence=$acknowledgedSequence latency_ms=$latencyMs",
+			progress = true,
+			now = acknowledgedAt
+		)
+		observeInteractionAck(latencyMs)
 		completePendingClick(Minecraft.getInstance(), pending)
 	}
 
@@ -856,6 +1127,10 @@ class AutoSSSpecsafe : CgcModule(
 		} else {
 			(smoothedInteractionAckMs * 2L + boundedSample) / 3L
 		}
+		debugEvent(
+			"interaction_ack_timing",
+			"sample_ms=$sampleMs bounded_sample_ms=$boundedSample smoothed_ms=$smoothedInteractionAckMs"
+		)
 	}
 
 	private fun observeServerTime(gameTime: Long, receivedAtMs: Long) {
@@ -875,6 +1150,10 @@ class AutoSSSpecsafe : CgcModule(
 
 		val sampleMs = elapsedMs.toDouble() / elapsedTicks.toDouble()
 		if (sampleMs !in MIN_SERVER_TICK_SAMPLE_MS..MAX_SERVER_TICK_SAMPLE_MS) {
+			debugEvent(
+				"server_tick_sample_rejected",
+				"game_ticks=$elapsedTicks elapsed_ms=$elapsedMs sample_ms=${debugDouble(sampleMs)}"
+			)
 			return
 		}
 		val previousEstimate = estimatedServerTickMs
@@ -883,6 +1162,10 @@ class AutoSSSpecsafe : CgcModule(
 		} else {
 			previousEstimate * SERVER_TICK_SMOOTHING_OLD_WEIGHT + sampleMs * (1.0 - SERVER_TICK_SMOOTHING_OLD_WEIGHT)
 		}
+		debugEvent(
+			"server_tick_timing",
+			"game_ticks=$elapsedTicks elapsed_ms=$elapsedMs sample_ms=${debugDouble(sampleMs)} estimated_ms=${estimatedServerTickMs?.let(::debugDouble) ?: "unknown"}"
+		)
 	}
 
 	private fun resetServerTiming() {
@@ -893,13 +1176,26 @@ class AutoSSSpecsafe : CgcModule(
 
 	private fun acknowledgePendingClickFromBlockUpdate(pos: BlockPos, newState: BlockState) {
 		val pending = pendingClick ?: return
-		val buttonPressed = !pending.startButton && pos == pending.button && isPressedStoneButton(newState)
+		val buttonPressed = pos == pending.button && isPressedStoneButton(newState)
 		val serverAdvancedPattern = isPatternLightUpdate(pos, newState) &&
-			(pending.startButton || pending.solveIndex >= clicks.lastIndex)
+			pending.solveIndex >= clicks.lastIndex
 		if (!buttonPressed && !serverAdvancedPattern) {
+			if (pos == pending.button || isPatternLightUpdate(pos, newState)) {
+				debugEvent(
+					"click_block_update_not_confirming",
+					"position=${debugPos(pos)} state=$newState pending_button=${debugPos(pending.button)}"
+				)
+			}
 			return
 		}
 
+		val confirmedAt = nowMs()
+		debugEvent(
+			"click_acknowledged",
+			"source=block_update button=${debugPos(pending.button)} update_position=${debugPos(pos)} update_state=$newState button_pressed=$buttonPressed pattern_advanced=$serverAdvancedPattern latency_ms=${(confirmedAt - pending.sentAtMs).coerceAtLeast(0L)}",
+			progress = true,
+			now = confirmedAt
+		)
 		completePendingClick(Minecraft.getInstance(), pending)
 	}
 
@@ -909,20 +1205,28 @@ class AutoSSSpecsafe : CgcModule(
 		}
 		pendingClick = null
 		if (!doingSS) {
-			clearTarget()
-			return
-		}
-
-		if (pending.startButton) {
+			debugEvent(
+				"click_completion_ignored",
+				"button=${debugPos(pending.button)} sequence=${pending.packetSequence} reason=solver_not_running"
+			)
 			clearTarget()
 			return
 		}
 
 		if (pending.solveIndex !in clicks.indices || clicks[pending.solveIndex] != pending.button) {
+			saveDebugFailure(
+				"A confirmed click no longer matched the captured pattern (index=${pending.solveIndex}, button=${debugPos(pending.button)}).",
+				client
+			)
 			clearTarget()
 			return
 		}
 		state = pending.solveIndex + 1
+		debugEvent(
+			"solve_click_completed",
+			"button=${debugPos(pending.button)} sequence=${pending.packetSequence} completed_index=${pending.solveIndex} next_state=$state pattern_length=${clicks.size}",
+			progress = true
+		)
 		if (state < clicks.size) {
 			if (isPreparedSequenceMotion(clicks[state])) {
 				return
@@ -938,6 +1242,11 @@ class AutoSSSpecsafe : CgcModule(
 		patternSettledAt = 0L
 		completedSequenceCount++
 		practiceUnlocked = completedSequenceCount >= PRACTICE_UNLOCK_SEQUENCE_COUNT
+		debugEvent(
+			"sequence_completed",
+			"sequence_length=${clicks.size} completed_sequences=$completedSequenceCount practice_unlocked=$practiceUnlocked",
+			progress = true
+		)
 		if (clicks.size >= FINAL_SEQUENCE_LENGTH) {
 			finishSimonSays()
 			return
@@ -1094,7 +1403,7 @@ class AutoSSSpecsafe : CgcModule(
 		return if (doneFirst) {
 			clicks.firstOrNull()
 		} else {
-			patternCapture.openingPattern()?.firstOrNull()
+			patternCapture.openingSkipFirstCandidate()
 		}
 	}
 
@@ -1573,6 +1882,11 @@ class AutoSSSpecsafe : CgcModule(
 
 		if (autoRestartAt <= 0L) {
 			autoRestartAt = nowMs() + randomAutoRestartReactionDelayMs()
+			debugEvent(
+				"auto_restart_scheduled",
+				"restart_in_ms=${(autoRestartAt - nowMs()).coerceAtLeast(0L)}",
+				progress = true
+			)
 		}
 		return true
 	}
@@ -1590,7 +1904,7 @@ class AutoSSSpecsafe : CgcModule(
 		}
 
 		clearAutoRestart()
-		start()
+		start("auto_restart")
 		return true
 	}
 
@@ -1598,12 +1912,21 @@ class AutoSSSpecsafe : CgcModule(
 		autoRestartAt = 0L
 	}
 
-	private fun handlePossibleSimonSaysFailure(message: String) {
+	private fun handlePossibleSimonSaysFailure(message: String, source: String) {
 		if (!doingSS || !areaCheck() || !isSimonSaysFailureMessage(message)) {
 			return
 		}
 
-		scheduleAutoRestart()
+		val cleanMessage = stripControlCodes(message)
+		debugEvent(
+			"failure_signal_detected",
+			"source=$source message=$cleanMessage",
+			progress = false
+		)
+		val restarting = scheduleAutoRestart()
+		saveDebugFailure(
+			"A Simon Says failure was reported via $source: $cleanMessage${if (restarting) " (auto restart scheduled)" else ""}."
+		)
 	}
 
 	private fun isSimonSaysFailureMessage(message: String): Boolean {
@@ -1633,6 +1956,224 @@ class AutoSSSpecsafe : CgcModule(
 
 	private fun stripControlCodes(message: String): String =
 		message.replace(CONTROL_CODE_PATTERN, "").trim()
+
+	private fun beginDebugSession(client: Minecraft, trigger: String, now: Long) {
+		debugRecorder.begin(
+			trigger = trigger,
+			metadata = debugMetadata(),
+			phase = debugPhase(now),
+			initialSnapshot = debugSnapshot(client, now),
+			nowMs = now
+		)
+	}
+
+	private fun observeDebugTick(client: Minecraft, now: Long) {
+		if (!debugRecorder.isActive) {
+			return
+		}
+		debugRecorder.observeTick(now, debugPhase(now), debugSnapshot(client, now))
+	}
+
+	private fun reportDebugStallIfNeeded(client: Minecraft, now: Long) {
+		val stalledForMs = debugRecorder.stalledForMs(now) ?: return
+		val pendingTimeoutWithGrace = pendingClick
+			?.let { pendingClickTimeoutMs() + PENDING_WATCHDOG_GRACE_MS }
+			?: 0L
+		val thresholdMs = max(STALL_REPORT_AFTER_MS, pendingTimeoutWithGrace)
+		if (stalledForMs < thresholdMs) {
+			return
+		}
+
+		val phase = debugPhase(now)
+		debugEvent(
+			"watchdog_stall",
+			"phase=$phase no_progress_for_ms=$stalledForMs threshold_ms=$thresholdMs"
+		)
+		saveDebugFailure(
+			"Auto SS made no logical progress for ${stalledForMs}ms while in phase '$phase'.",
+			client,
+			now
+		)
+	}
+
+	private fun debugEvent(
+		category: String,
+		details: String,
+		progress: Boolean = false,
+		now: Long = nowMs()
+	) {
+		debugRecorder.event(category, details, now, progress)
+	}
+
+	private fun saveDebugFailure(
+		reason: String,
+		client: Minecraft = Minecraft.getInstance(),
+		now: Long = nowMs()
+	) {
+		if (!debugRecorder.isActive) {
+			return
+		}
+		val result = debugRecorder.fail(reason, debugSnapshot(client, now), now) ?: return
+		when {
+			result.path != null -> chat("Auto SS debug report saved: config/cgc/reports/${result.path.fileName}")
+			result.error != null -> chat("Auto SS debug report could not be saved: ${result.error}")
+		}
+	}
+
+	private fun debugMetadata(): Map<String, String> =
+		linkedMapOf(
+			"cgc_version" to debugModVersion("cgc"),
+			"minecraft_version" to debugModVersion("minecraft"),
+			"java_version" to (System.getProperty("java.version") ?: "unknown"),
+			"os" to listOfNotNull(
+				System.getProperty("os.name"),
+				System.getProperty("os.version"),
+				System.getProperty("os.arch")
+			).joinToString(" "),
+			"auto_start" to autoStart.value.toString(),
+			"auto_restart_ss" to autoRestartSs.value.toString(),
+			"force_skyblock" to forceSkyblock.value.toString(),
+			"auto_start_delay_ms" to getDouble(autoStartDelay).toString(),
+			"aim_speed" to getDouble(aimSpeed).toString(),
+			"wait_correction_aim_speed" to getDouble(waitCorrectionAimSpeed).toString(),
+			"practice_aim_speed" to getDouble(practiceAimSpeed).toString(),
+			"practice_aim_cycles" to practiceAimCycles.value.toString(),
+			"location_area" to Location.area.toString(),
+			"location_floor" to Location.floor.toString(),
+			"phase_p3" to DungeonUtils.isPhase(Phase7.P3).toString()
+		)
+
+	private fun debugModVersion(modId: String): String =
+		runCatching {
+			FabricLoader.getInstance()
+				.getModContainer(modId)
+				.map { it.metadata.version.friendlyString }
+				.orElse("unknown")
+		}.getOrDefault("unknown")
+
+	private fun debugPhase(now: Long): String {
+		val pending = pendingClick
+		val target = targetButton
+		return when {
+			!doingSS -> "inactive"
+			pending != null -> "waiting_click_ack:${debugPos(pending.button)}:sequence=${pending.packetSequence}"
+			startClicksRemaining > 0 && target != null -> "aiming_start_button:remaining=$startClicksRemaining"
+			startClicksRemaining > 0 -> "waiting_start_click:remaining=$startClicksRemaining"
+			targetPractice && targetPracticeReturningToStart -> "practice_return:${target?.let(::debugPos) ?: "none"}:pass=$practicePassesCompleted"
+			targetPractice -> "practice_aim:${target?.let(::debugPos) ?: "none"}:index=$targetPracticeIndex:pass=$practicePassesCompleted"
+			targetWaitingForButton -> "waiting_for_real_button:${target?.let(::debugPos) ?: "none"}"
+			targetPreAim && targetOpeningPreAim -> "opening_pre_aim:${target?.let(::debugPos) ?: "none"}"
+			targetPreAim -> "pre_aim:${target?.let(::debugPos) ?: "none"}"
+			target != null -> "solve_aim:${debugPos(target)}:index=$state"
+			openingPreAimButton != null && now < openingPreAimAt -> "opening_pre_aim_delay:${debugPos(openingPreAimButton!!)}"
+			patternCapture.observationCount > 0 && now < patternSettledAt -> "pattern_settling:observations=${patternCapture.observationCount}"
+			clicks.isEmpty() -> "waiting_for_pattern_capture:observations=${patternCapture.observationCount}"
+			state >= clicks.size -> "waiting_for_next_pattern:completed=$completedSequenceCount:length=${clicks.size}"
+			now - lastClickTime < currentClickDelayMs -> "waiting_click_delay:index=$state"
+			now < nextServerSafeClickAtMs -> "waiting_server_safe_spacing:index=$state"
+			now < patternSettledAt -> "waiting_pattern_settle:index=$state"
+			else -> "ready_to_solve:index=$state:length=${clicks.size}"
+		}
+	}
+
+	private fun debugSnapshot(client: Minecraft, now: Long): Map<String, String> {
+		val player = client.player
+		val level = client.level
+		val gameMode = client.gameMode
+		val target = targetButton
+		val pending = pendingClick
+		val plan = aimController.currentPlan()
+		val aimResult = latestAimResult
+		val freshTargetHit = target?.let { getLookHit(client, it) }
+		val targetDistanceSq = if (player != null && target != null) {
+			player.distanceToSqr(Vec3.atCenterOf(target))
+		} else {
+			null
+		}
+		val actualAimError = if (plan != null && aimResult != null) {
+			angularError(aimResult.rotation, plan.final)
+		} else {
+			null
+		}
+		return linkedMapOf(
+			"phase" to debugPhase(now),
+			"doing_ss" to doingSS.toString(),
+			"area_check" to areaCheck().toString(),
+			"player_present" to (player != null).toString(),
+			"world_present" to (level != null).toString(),
+			"game_mode_present" to (gameMode != null).toString(),
+			"player_position" to (player?.let { debugVec(it.position()) } ?: "unavailable"),
+			"player_eye_position" to (player?.let { debugVec(it.eyePosition) } ?: "unavailable"),
+			"player_rotation" to (player?.let { debugRotation(Rotation(it.yRot, it.xRot)) } ?: "unavailable"),
+			"player_look" to (player?.let { debugVec(it.lookAngle) } ?: "unavailable"),
+			"distance_to_start_squared" to (player?.distanceToSqr(START_BUTTON)?.let(::debugDouble) ?: "unavailable"),
+			"screen" to (client.screen?.javaClass?.name ?: "none"),
+			"mouse_grabbed" to client.mouseHandler.isMouseGrabbed.toString(),
+			"destroying_block" to (gameMode?.isDestroying?.toString() ?: "unavailable"),
+			"hands_busy" to (player?.isHandsBusy?.toString() ?: "unavailable"),
+			"selected_hotbar_slot" to (player?.inventory?.selectedSlot?.toString() ?: "unavailable"),
+			"main_hand_item" to (player?.mainHandItem?.toString() ?: "unavailable"),
+			"off_hand_item" to (player?.offhandItem?.toString() ?: "unavailable"),
+			"crosshair_hit" to debugHit(client.hitResult),
+			"target_button" to (target?.let(::debugPos) ?: "none"),
+			"target_block_state" to (if (level != null && target != null) level.getBlockState(target).toString() else "unavailable"),
+			"fresh_target_raycast" to (freshTargetHit?.let(::debugHit) ?: "none"),
+			"target_distance_squared" to (targetDistanceSq?.let(::debugDouble) ?: "unavailable"),
+			"target_flags" to "start=$targetIsStart pre_aim=$targetPreAim opening_pre_aim=$targetOpeningPreAim practice=$targetPractice practice_return=$targetPracticeReturningToStart waiting_for_button=$targetWaitingForButton wait_correction_started=$targetWaitCorrectionStarted wait_correction_on_real_button=$targetWaitCorrectionOnRealButton",
+			"target_aim_point" to (targetAimPoint?.let(::debugVec) ?: "none"),
+			"aim_plan" to (plan?.let {
+				"mode=${it.mode} start=${debugRotation(it.start)} final=${debugRotation(it.final)} distance_deg=${debugDouble(it.angularDistance)} elapsed_ms=${(now - it.startedAtMs).coerceAtLeast(0L)} duration_ms=${it.durationMs} click_ready_at_ms=${it.clickReadyAtMs} seed=${it.seed}"
+			} ?: "none"),
+			"aim_result" to (aimResult?.let { "rotation=${debugRotation(it.rotation)} ready_to_click=${it.readyToClick} finished=${it.finished}" } ?: "none"),
+			"actual_aim_error_degrees" to (actualAimError?.let(::debugDouble) ?: "unavailable"),
+			"captured_pattern" to debugPattern(clicks),
+			"pattern_observations" to patternCapture.observationCount.toString(),
+			"pattern_observation_buttons" to debugPattern(patternCapture.observations()),
+			"solve_state" to "$state/${clicks.size}",
+			"expected_solve_button" to (clicks.getOrNull(state)?.let(::debugPos) ?: "none"),
+			"completed_sequences" to completedSequenceCount.toString(),
+			"start_clicks_remaining" to startClicksRemaining.toString(),
+			"practice_state" to "unlocked=$practiceUnlocked index=$targetPracticeIndex passes=$practicePassesCompleted/$practiceMaxPasses buttons=${debugPattern(practiceButtons)}",
+			"pending_click" to (pending?.let {
+				"button=${debugPos(it.button)} start=false solve_index=${it.solveIndex} packet_sequence=${it.packetSequence} age_ms=${(now - it.sentAtMs).coerceAtLeast(0L)} timeout_ms=${pendingClickTimeoutMs()}"
+			} ?: "none"),
+			"last_click_age_ms" to (now - lastClickTime).coerceAtLeast(0L).toString(),
+			"current_click_delay_ms" to currentClickDelayMs.toString(),
+			"click_delay_remaining_ms" to (currentClickDelayMs - (now - lastClickTime)).coerceAtLeast(0L).toString(),
+			"server_safe_spacing_remaining_ms" to (nextServerSafeClickAtMs - now).coerceAtLeast(0L).toString(),
+			"pattern_settle_remaining_ms" to (patternSettledAt - now).coerceAtLeast(0L).toString(),
+			"next_start_click_remaining_ms" to (nextStartClickAt - now).coerceAtLeast(0L).toString(),
+			"auto_restart_remaining_ms" to (autoRestartAt - now).coerceAtLeast(0L).toString(),
+			"detect_block_state" to (level?.getBlockState(DETECT)?.toString() ?: "unavailable"),
+			"smoothed_interaction_ack_ms" to smoothedInteractionAckMs.toString(),
+			"estimated_server_tick_ms" to (estimatedServerTickMs?.let(::debugDouble) ?: "unknown"),
+			"last_server_game_time" to (lastServerGameTime?.toString() ?: "unknown"),
+			"last_server_time_packet_age_ms" to (if (lastServerTimePacketAtMs > 0L) (now - lastServerTimePacketAtMs).coerceAtLeast(0L).toString() else "unknown"),
+			"thread" to Thread.currentThread().name
+		)
+	}
+
+	private fun debugPattern(pattern: List<BlockPos>): String =
+		if (pattern.isEmpty()) "[]" else pattern.joinToString(prefix = "[", postfix = "]", transform = ::debugPos)
+
+	private fun debugPos(pos: BlockPos): String =
+		"(${pos.x},${pos.y},${pos.z})"
+
+	private fun debugVec(vec: Vec3): String =
+		"(${debugDouble(vec.x)},${debugDouble(vec.y)},${debugDouble(vec.z)})"
+
+	private fun debugRotation(rotation: Rotation): String =
+		"(yaw=${debugDouble(rotation.yaw.toDouble())},pitch=${debugDouble(rotation.pitch.toDouble())})"
+
+	private fun debugHit(hit: HitResult?): String =
+		when (hit) {
+			is BlockHitResult -> "${hit.type}:block=${debugPos(hit.blockPos)} face=${hit.direction} location=${debugVec(hit.location)}"
+			null -> "none"
+			else -> "${hit.type}:location=${debugVec(hit.location)}"
+		}
+
+	private fun debugDouble(value: Double): String =
+		String.format(Locale.ROOT, "%.3f", value)
 
 	private fun areaCheck(): Boolean =
 		forceSkyblock.value ||
@@ -1668,15 +2209,19 @@ class AutoSSSpecsafe : CgcModule(
 	}
 
 	private fun finishSimonSays() {
-		AutoLeap.onSimonSaysComplete()
+		val client = Minecraft.getInstance()
+		val finishedAt = nowMs()
+		debugEvent("solver_completed", "final_sequence_length=${clicks.size}", progress = true, now = finishedAt)
+		debugRecorder.complete(debugSnapshot(client, finishedAt), finishedAt)
 		doingSS = false
-		donePopupUntil = nowMs() + DONE_POPUP_MS
+		donePopupUntil = finishedAt + DONE_POPUP_MS
 		patternCapture.clear()
 		clearAutoRestart()
 		clearTarget()
 	}
 
 	private fun stopSimonSaysSafely(message: String) {
+		saveDebugFailure(message)
 		doingSS = false
 		patternCapture.clear()
 		clearAutoRestart()
@@ -1703,6 +2248,9 @@ class AutoSSSpecsafe : CgcModule(
 		latestAimResult = null
 		mouseMotion.clear()
 		pendingClick = null
+		clickPacketIntent = null
+		capturedClickPacketSequence = null
+		clickPacketRejectionReason = null
 	}
 
 	private fun middleOffset(random: ThreadLocalRandom, maxOffset: Double): Double {
@@ -1801,7 +2349,10 @@ class AutoSSSpecsafe : CgcModule(
 
 	private companion object {
 		private val START_BUTTON = Vec3(110.875, 121.5, 91.5)
-		private val DETECT = BlockPos(110, 123, 92)
+		private val DETECT = BlockPos(110, 120, 93)
+		private val INPUT_BUTTONS = (120..123).flatMap { y ->
+			(92..95).map { z -> BlockPos(110, y, z) }
+		}
 		private const val MAX_BUTTON_DISTANCE_SQ = 36.0
 		private const val RAYCAST_DISTANCE = 6.0
 		private const val START_BUTTON_FACE_RAY_EPSILON = 1.0E-5
@@ -1849,6 +2400,8 @@ class AutoSSSpecsafe : CgcModule(
 		private const val MIN_PENDING_CLICK_TIMEOUT_MS = 6000L
 		private const val MAX_PENDING_CLICK_TIMEOUT_MS = 15000L
 		private const val PENDING_CLICK_TIMEOUT_ACK_MULTIPLIER = 6L
+		private const val STALL_REPORT_AFTER_MS = 12_000L
+		private const val PENDING_WATCHDOG_GRACE_MS = 1_000L
 		private const val MIN_SERVER_SAFE_CLICK_SPACING_MS = 125L
 		private const val MAX_SERVER_SAFE_CLICK_SPACING_MS = 350L
 		private const val SERVER_SAFE_CLICK_JITTER_MS = 25L
@@ -1858,8 +2411,7 @@ class AutoSSSpecsafe : CgcModule(
 		private const val MIN_SERVER_TICK_SAMPLE_MS = 20.0
 		private const val MAX_SERVER_TICK_SAMPLE_MS = 500.0
 		private const val SERVER_TICK_SMOOTHING_OLD_WEIGHT = 0.7
-		private const val MIN_START_CLICK_DELAY_MS = 105L
-		private const val MAX_START_CLICK_DELAY_MS = 130L
+		private const val START_CLICK_INTERVAL_MS = 150L
 		private const val AUTO_START_DELAY_RANDOM_EXTRA_MS = 40L
 		private val CONTROL_CODE_PATTERN = Regex("(?i)§[0-9A-FK-OR]")
 
@@ -1868,9 +2420,6 @@ class AutoSSSpecsafe : CgcModule(
 
 		private fun startButtonPos(): BlockPos =
 			BlockPos.containing(START_BUTTON.x, START_BUTTON.y, START_BUTTON.z)
-
-		private fun randomStartClickDelayMs(): Long =
-			ThreadLocalRandom.current().nextLong(MIN_START_CLICK_DELAY_MS, MAX_START_CLICK_DELAY_MS + 1L)
 	}
 
 	private data class GridMotion(
@@ -1890,14 +2439,20 @@ class AutoSSSpecsafe : CgcModule(
 
 	private data class PendingClick(
 		val button: BlockPos,
-		val startButton: Boolean,
 		val solveIndex: Int,
 		val packetSequence: Int,
 		val sentAtMs: Long
 	)
 
+	private data class ClickIntent(
+		val button: BlockPos,
+		val startButton: Boolean,
+		val solveIndex: Int
+	)
+
 	private sealed interface ClickSendResult {
-		data object NotReady : ClickSendResult
+		data class NotReady(val reason: String) : ClickSendResult
+		data class GuardRejected(val reason: String) : ClickSendResult
 		data object LocallySuppressed : ClickSendResult
 		data class Sent(val packetSequence: Int) : ClickSendResult
 	}
