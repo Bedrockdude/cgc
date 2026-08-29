@@ -4,14 +4,19 @@ import net.minecraft.client.player.LocalPlayer
 import net.minecraft.util.Mth
 import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-class AutoCLookController {
+class AutoCLookController(
+	private val speedMultiplier: () -> Double = { 1.0 }
+) {
 	private var plan: LookPlan? = null
+	private var queuedPlan: QueuedLookPlan? = null
+	private var movingPlan: MovingLookPlan? = null
 
 	fun start(player: LocalPlayer, yaw: Float, pitch: Float, nowMs: Long = nowMs()) {
 		start(player, yaw, pitch, nowMs, NORMAL_PROFILE)
@@ -21,19 +26,65 @@ class AutoCLookController {
 		start(player, yaw, pitch, nowMs, FAST_PROFILE)
 	}
 
-	fun startEtherwarp(player: LocalPlayer, yaw: Float, pitch: Float, nowMs: Long = nowMs()) {
-		start(player, yaw, pitch, nowMs, ETHERWARP_PROFILE)
+	fun startEtherwarp(player: LocalPlayer, yaw: Float, pitch: Float, targetDistance: Double, nowMs: Long = nowMs()) {
+		val startYaw = player.yRot
+		val startPitch = player.xRot.coerceIn(MIN_PITCH, MAX_PITCH)
+		val yawDelta = Mth.wrapDegrees(yaw - startYaw)
+		val pitchDelta = pitch.coerceIn(MIN_PITCH, MAX_PITCH) - startPitch
+		val distance = sqrt((yawDelta * yawDelta + pitchDelta * pitchDelta).toDouble())
+		val correctionScale = etherwarpCorrectionScale(targetDistance)
+		if (distance <= ETHERWARP_MICRO_MIN_DISTANCE || correctionScale <= 0.0) {
+			start(player, yaw, pitch, nowMs, ETHERWARP_PROFILE)
+			return
+		}
+
+		val random = ThreadLocalRandom.current()
+		val correctionSize = (random.nextDouble(ETHERWARP_MICRO_MIN_DEGREES, ETHERWARP_MICRO_MAX_DEGREES) * correctionScale)
+			.coerceAtMost(distance * ETHERWARP_MICRO_DISTANCE_FRACTION)
+		val yawShare = if (abs(yawDelta) >= abs(pitchDelta)) correctionSize * if (yawDelta >= 0.0f) 1.0 else -1.0 else 0.0
+		val pitchShare = if (yawShare == 0.0) correctionSize * if (pitchDelta >= 0.0f) 1.0 else -1.0 else correctionSize * ETHERWARP_MICRO_PITCH_SHARE * if (pitchDelta >= 0.0f) 1.0 else -1.0
+		queuedPlan = QueuedLookPlan(yaw, pitch.coerceIn(MIN_PITCH, MAX_PITCH), ETHERWARP_CORRECTION_PROFILE)
+		start(player, (yaw - yawShare).toFloat(), (pitch - pitchShare).toFloat(), nowMs, ETHERWARP_PROFILE, preserveQueue = true)
 	}
 
-	private fun start(player: LocalPlayer, yaw: Float, pitch: Float, nowMs: Long, profile: LookProfile) {
+	fun startWarp(player: LocalPlayer, yaw: Float, pitch: Float, nowMs: Long = nowMs()) {
+		start(player, yaw, pitch, nowMs, NORMAL_PROFILE, forceDuration = true)
+	}
+
+	fun startMovingEtherwarp(player: LocalPlayer, yaw: Float, pitch: Float, nowMs: Long = nowMs()) {
+		movingPlan = MovingLookPlan(yaw, pitch.coerceIn(MIN_PITCH, MAX_PITCH))
+		queuedPlan = null
+		start(player, yaw, pitch, nowMs, ETHERWARP_PROFILE, preserveMoving = true)
+	}
+
+	fun retargetMovingEtherwarp(yaw: Float, pitch: Float) {
+		val active = movingPlan ?: return
+		active.yaw = yaw
+		active.pitch = pitch.coerceIn(MIN_PITCH, MAX_PITCH)
+	}
+
+	private fun start(
+		player: LocalPlayer,
+		yaw: Float,
+		pitch: Float,
+		nowMs: Long,
+		profile: LookProfile,
+		preserveQueue: Boolean = false,
+		preserveMoving: Boolean = false,
+		forceDuration: Boolean = false
+	) {
+		if (!preserveMoving) movingPlan = null
+		if (!preserveQueue) queuedPlan = null
 		val start = LookRotation(player.yRot, player.xRot.coerceIn(MIN_PITCH, MAX_PITCH))
 		val target = LookRotation(yaw, pitch.coerceIn(MIN_PITCH, MAX_PITCH))
 		val yawDelta = Mth.wrapDegrees(target.yaw - start.yaw)
 		val pitchDelta = (target.pitch - start.pitch).coerceIn(-180.0f, 180.0f)
 		val distance = sqrt((yawDelta * yawDelta + pitchDelta * pitchDelta).toDouble())
-		if (distance <= profile.directApplyDistance) {
+		if (distance <= profile.directApplyDistance && (!forceDuration || distance <= ZERO_ROTATION_EPSILON)) {
 			setRotation(player, LookRotation(start.yaw + yawDelta, start.pitch + pitchDelta))
-			clear()
+			plan = null
+			queuedPlan = null
+			if (!preserveMoving) movingPlan = null
 			return
 		}
 
@@ -54,11 +105,27 @@ class AutoCLookController {
 	}
 
 	fun update(player: LocalPlayer, nowMs: Long = nowMs()) {
+		val moving = movingPlan
+		if (plan == null && moving != null) {
+			start(player, moving.yaw, moving.pitch, nowMs, ETHERWARP_PROFILE, preserveMoving = true)
+			return
+		}
 		val active = plan ?: return
+		if (moving != null) {
+			active.final = LookRotation(moving.yaw, moving.pitch)
+			active.yawDelta = Mth.wrapDegrees(moving.yaw - active.start.yaw)
+			active.pitchDelta = (moving.pitch - active.start.pitch).coerceIn(-180.0f, 180.0f)
+			active.distance = sqrt((active.yawDelta * active.yawDelta + active.pitchDelta * active.pitchDelta).toDouble())
+		}
 		val elapsed = (nowMs - active.startedAtMs).coerceAtLeast(0L)
 		if (elapsed >= active.durationMs) {
 			setRotation(player, active.final)
-			clear()
+			plan = null
+			val next = if (moving == null) queuedPlan else null
+			queuedPlan = null
+			if (next != null) {
+				start(player, next.yaw, next.pitch, nowMs, next.profile)
+			}
 			return
 		}
 
@@ -75,10 +142,12 @@ class AutoCLookController {
 	}
 
 	fun hasPlan(): Boolean =
-		plan != null
+		plan != null || movingPlan != null
 
 	fun clear() {
 		plan = null
+		queuedPlan = null
+		movingPlan = null
 	}
 
 	private fun setRotation(player: LocalPlayer, rotation: LookRotation) {
@@ -91,7 +160,11 @@ class AutoCLookController {
 		val distanceFactor = (distance / LARGE_DISTANCE).coerceIn(0.0, 1.0)
 		val base = profile.minDurationMs + distance * profile.msPerDegree + distanceFactor * profile.largeTurnExtraMs
 		val variance = random.nextDouble(-profile.durationVarianceMs, profile.durationVarianceMs)
-		return (base + variance).toLong().coerceIn(profile.minDurationMs.toLong(), profile.maxDurationMs.toLong())
+		val speed = speedMultiplier().takeIf { it.isFinite() }?.coerceIn(MIN_SPEED_MULTIPLIER, MAX_SPEED_MULTIPLIER) ?: 1.0
+		return ((base + variance) / speed).toLong().coerceIn(
+			(profile.minDurationMs / speed).toLong().coerceAtLeast(1L),
+			(profile.maxDurationMs / speed).toLong().coerceAtLeast(1L)
+		)
 	}
 
 	private fun humanProgress(rawProgress: Double, distance: Double, profile: LookProfile): Double {
@@ -154,10 +227,10 @@ class AutoCLookController {
 
 	private data class LookPlan(
 		val start: LookRotation,
-		val final: LookRotation,
-		val yawDelta: Float,
-		val pitchDelta: Float,
-		val distance: Double,
+		var final: LookRotation,
+		var yawDelta: Float,
+		var pitchDelta: Float,
+		var distance: Double,
 		val startedAtMs: Long,
 		val durationMs: Long,
 		val curveYaw: Double,
@@ -166,6 +239,8 @@ class AutoCLookController {
 	)
 
 	private data class LookCurve(val yaw: Double, val pitch: Double)
+	private data class QueuedLookPlan(val yaw: Float, val pitch: Float, val profile: LookProfile)
+	private data class MovingLookPlan(var yaw: Float, var pitch: Float)
 
 	private data class LookProfile(
 		val directApplyDistance: Double,
@@ -205,6 +280,14 @@ class AutoCLookController {
 		private const val ETHERWARP_MS_PER_DEGREE = 1.52
 		private const val ETHERWARP_LARGE_TURN_EXTRA_MS = 36.0
 		private const val ETHERWARP_DURATION_VARIANCE_MS = 4.0
+		private const val ETHERWARP_MICRO_MIN_DISTANCE = 0.35
+		private const val ETHERWARP_MICRO_MIN_DEGREES = 0.12
+		private const val ETHERWARP_MICRO_MAX_DEGREES = 0.28
+		private const val ETHERWARP_MICRO_DISTANCE_FRACTION = 0.18
+		private const val ETHERWARP_MICRO_PITCH_SHARE = 0.35
+		private const val ZERO_ROTATION_EPSILON = 1.0E-4
+		private const val MIN_SPEED_MULTIPLIER = 0.25
+		private const val MAX_SPEED_MULTIPLIER = 3.0
 		private const val INITIAL_LEAD_ALLOWANCE = 0.012
 		private const val EARLY_LEAD_LIMIT_UNTIL = 0.44
 		private const val MIN_CURVE_FRACTION = 0.004
@@ -254,5 +337,28 @@ class AutoCLookController {
 			earlyLeadBase = 1.08,
 			earlyLeadScale = 0.42
 		)
+		private val ETHERWARP_CORRECTION_PROFILE = LookProfile(
+			directApplyDistance = 0.015,
+			minDurationMs = 145.0,
+			maxDurationMs = 230.0,
+			msPerDegree = 120.0,
+			largeTurnExtraMs = 0.0,
+			durationVarianceMs = 12.0,
+			fastBlendMin = 0.04,
+			fastBlendMax = 0.08,
+			easeOutPowerBase = 1.04,
+			easeOutPowerScale = 0.0,
+			earlyLeadBase = 1.04,
+			earlyLeadScale = 0.0
+		)
 	}
 }
+
+internal fun etherwarpCorrectionScale(targetDistance: Double): Double {
+	if (!targetDistance.isFinite()) return 1.0
+	return ((targetDistance - ETHERWARP_CORRECTION_START_DISTANCE) /
+		(ETHERWARP_CORRECTION_FULL_DISTANCE - ETHERWARP_CORRECTION_START_DISTANCE)).coerceIn(0.0, 1.0)
+}
+
+private const val ETHERWARP_CORRECTION_START_DISTANCE = 8.0
+private const val ETHERWARP_CORRECTION_FULL_DISTANCE = 48.0

@@ -79,7 +79,7 @@ object CgcCommandRegistry {
 		openConfig: () -> Unit,
 		openUi: () -> Unit
 	) {
-		dispatcher.register(
+			dispatcher.register(
 			fabricLiteral("cgc")
 				.then(fabricAutoCCommand("ac"))
 				.then(fabricLiteral("ui").executes {
@@ -389,7 +389,7 @@ object CgcCommandRegistry {
 
 	private fun acUsage() {
 		info("AC: use /ac add <${AutoCNodeType.commandNames().joinToString("|")}>, /ac remove, /ac undo, or /ac edit.")
-		info("AC args: strafe <W|A|S|D>, interact <true|false>, crouch <seconds>, command <command>, leap <class>, record <seconds>, break <true|false> <seconds>.")
+		info("AC args: etherwarp [exactlyPos], strafe <W|A|S|D>, interact <true|false>, crouch <seconds>, wait <seconds>, track <seconds> <x> <y> <z>, command <command>, leap <class>, record <seconds>, break <true|false> <seconds> [notMoving].")
 		info("AC modifiers: AS, nr, h<number>, R(number), wait(number), maxA(number), phaseStart(p1|p2|s1|s2|s3|s4|p4|p5). Walk/strafe can use activeFor(number).")
 		info("AC stop nodes can use n<node>, for example ncrouch.")
 	}
@@ -409,6 +409,7 @@ object CgcCommandRegistry {
 	private fun acArgSuggestionsFor(nodeRaw: String, previousTokens: List<String>): List<String> {
 		val type = AutoCNodeType.byName(nodeRaw)
 		val base = when (type) {
+			AutoCNodeType.ETHERWARP -> if (previousTokens.any { it.equals("exactlyPos", ignoreCase = true) }) emptyList() else listOf("exactlyPos")
 			AutoCNodeType.WALK -> listOf("activeFor(0.5)", "activeFor(1)", "activeFor(2)")
 			AutoCNodeType.STRAFE -> {
 				val direction = if (previousTokens.any { it.equalsAny("W", "A", "S", "D") }) emptyList() else listOf("W", "A", "S", "D")
@@ -419,10 +420,16 @@ object CgcCommandRegistry {
 			AutoCNodeType.BREAK -> when {
 				previousTokens.isEmpty() -> listOf("true", "false")
 				previousTokens.first().equalsAny("true", "false") && previousTokens.size == 1 -> listOf("1", "2", "3", "5")
+				previousTokens.size == 2 -> listOf("notMoving")
 				else -> emptyList()
 			}
 			AutoCNodeType.RECORD -> if (previousTokens.any { it.toDoubleOrNull() != null }) emptyList() else listOf("1", "2", "3", "5")
 			AutoCNodeType.CROUCH -> if (previousTokens.any { it.toDoubleOrNull() != null }) emptyList() else listOf("0", "0.25", "0.5", "1")
+			AutoCNodeType.WAIT -> if (previousTokens.any { it.toDoubleOrNull() != null }) emptyList() else listOf("0.25", "0.5", "1", "2")
+			AutoCNodeType.TRACK -> when (previousTokens.size) {
+				0 -> listOf("0.5", "1", "2", "3")
+				else -> emptyList()
+			}
 			AutoCNodeType.STOP -> AutoCNodeType.commandNames()
 				.asSequence()
 				.filter { !it.equals("stop", ignoreCase = true) }
@@ -454,14 +461,20 @@ object CgcCommandRegistry {
 			return 0
 		}
 
-		val node = module.addNode(type, args)
-		if (node == null) {
-			error("Failed to add AC ${type.commandName} node. Usage: ${type.usage}.")
-			return 0
+		return when (val result = module.addNode(type, args)) {
+			is AutoC.AddNodeResult.Added -> {
+				info("AC: added ${result.node.name()} node at ${result.node.pos.toChatString()}.")
+				1
+			}
+			AutoC.AddNodeResult.PendingCrouch -> {
+				info("AC: crouching before capturing the Etherwarp target…")
+				1
+			}
+			AutoC.AddNodeResult.Failed -> {
+				error("Failed to add AC ${type.commandName} node. Usage: ${type.usage}.")
+				0
+			}
 		}
-
-		info("AC: added ${node.name()} node at ${node.pos.toChatString()}.")
-		return 1
 	}
 
 	private fun removeAcNode(): Int {

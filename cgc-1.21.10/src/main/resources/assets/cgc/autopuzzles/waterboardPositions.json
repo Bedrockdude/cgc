@@ -1,0 +1,23 @@
+{
+  "quartz_block": {
+    "etherwarp": { "x": 19.5, "y": 60.0, "z": 20.5 }
+  },
+  "gold_block": {
+    "etherwarp": { "x": 19.5, "y": 60.0, "z": 15.5 }
+  },
+  "coal_block": {
+    "etherwarp": { "x": 19.5, "y": 60.0, "z": 10.5 }
+  },
+  "diamond_block": {
+    "etherwarp": { "x": 11.5, "y": 60.0, "z": 20.5 }
+  },
+  "emerald_block": {
+    "etherwarp": { "x": 11.5, "y": 60.0, "z": 15.5 }
+  },
+  "hardened_clay": {
+    "etherwarp": { "x": 11.5, "y": 60.0, "z": 10.5 }
+  },
+  "water": {
+    "etherwarp": { "x": 15.5, "y": 59.0, "z": 6.5 }
+  }
+}

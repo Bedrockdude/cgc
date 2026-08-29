@@ -82,6 +82,7 @@ class AutoLeap : CgcModule(
 
 	private var pendingLeap: PendingLeap? = null
 	private var pendingUseTarget: String? = null
+	private var pendingUseOrigin: Phase7? = null
 	private var pendingUseDestination: Phase7? = null
 	private var pendingUseTick = 0L
 	private var clientTicks = 0L
@@ -199,11 +200,21 @@ class AutoLeap : CgcModule(
 		}
 
 		val setting = p3LeapSetting(after.section) ?: return
+		val origin = p3LeapOrigin(after.section) ?: return
 		val destination = p3LeapDestination(after.section) ?: return
-		if (setting.enabled.value && !isAlreadyAtLeapDestination(destination)) {
-			queueLeap(DungeonClass.findClassString(setting.target.value), "Healer S${after.section}", destination)
+		if (setting.enabled.value && isValidLeapPosition(origin, destination)) {
+			queueLeap(DungeonClass.findClassString(setting.target.value), "Healer S${after.section}", origin, destination)
 		}
 	}
+
+	private fun p3LeapOrigin(completedSection: Int): Phase7? =
+		when (completedSection) {
+			1 -> Phase7.S1
+			2 -> Phase7.S2
+			3 -> Phase7.S3
+			4 -> Phase7.S4
+			else -> null
+		}
 
 	private fun p3LeapSetting(section: Int): P3LeapSetting? =
 		when (section) {
@@ -229,6 +240,10 @@ class AutoLeap : CgcModule(
 			Phase7.P4 -> DungeonUtils.getF7Phase() == Phase7.P4
 			else -> false
 		}
+
+	private fun isValidLeapPosition(origin: Phase7?, destination: Phase7?): Boolean =
+		(origin == null || DungeonUtils.getP3Section() == origin)
+			&& !isAlreadyAtLeapDestination(destination)
 
 	private fun detectHealerMageCp(client: Minecraft) {
 		if (!isHealerSelected() || !mageCpEnabled.value || !DungeonUtils.isPhase(Phase7.P2)) {
@@ -271,17 +286,22 @@ class AutoLeap : CgcModule(
 		mageWasInside = inside
 	}
 
-	private fun queueLeap(targetClass: DungeonClass, reason: String, destination: Phase7? = null) {
+	private fun queueLeap(
+		targetClass: DungeonClass,
+		reason: String,
+		origin: Phase7? = null,
+		destination: Phase7? = null
+	) {
 		val now = System.currentTimeMillis()
 		if (targetClass == DungeonClass.NONE
-			|| isAlreadyAtLeapDestination(destination)
+			|| !isValidLeapPosition(origin, destination)
 			|| now - lastTriggerAt < TRIGGER_COOLDOWN_MS
 		) {
 			return
 		}
 
 		val delay = ThreadLocalRandom.current().nextLong(MIN_START_DELAY_MS, MAX_START_DELAY_MS + 1L)
-		pendingLeap = PendingLeap(targetClass, now + delay, reason, destination)
+		pendingLeap = PendingLeap(targetClass, now + delay, reason, origin, destination)
 		lastTriggerAt = now
 	}
 
@@ -292,7 +312,7 @@ class AutoLeap : CgcModule(
 		}
 
 		pendingLeap = null
-		if (isAlreadyAtLeapDestination(leap.destination)) {
+		if (!isValidLeapPosition(leap.origin, leap.destination)) {
 			return
 		}
 		val target = DungeonState.getClassPlayer(leap.targetClass)
@@ -301,15 +321,15 @@ class AutoLeap : CgcModule(
 			return
 		}
 
-		startLeap(client, target.name, leap.destination)
+		startLeap(client, target.name, leap.origin, leap.destination)
 	}
 
-	private fun startLeap(client: Minecraft, targetName: String, destination: Phase7?) {
+	private fun startLeap(client: Minecraft, targetName: String, origin: Phase7?, destination: Phase7?) {
 		val player = client.player ?: return
 		if (client.gameMode == null
 			|| client.level == null
 			|| TerminalContext.inTerminal
-			|| isAlreadyAtLeapDestination(destination)
+			|| !isValidLeapPosition(origin, destination)
 		) {
 			return
 		}
@@ -322,6 +342,7 @@ class AutoLeap : CgcModule(
 
 		if (previousSlot != player.inventory.selectedSlot) {
 			pendingUseTarget = targetName
+			pendingUseOrigin = origin
 			pendingUseDestination = destination
 			pendingUseTick = clientTicks + ThreadLocalRandom.current().nextInt(MIN_SLOT_SWITCH_SETTLE_TICKS, MAX_SLOT_SWITCH_SETTLE_TICKS + 1)
 			return
@@ -332,15 +353,17 @@ class AutoLeap : CgcModule(
 
 	private fun runPendingUse(client: Minecraft) {
 		val target = pendingUseTarget ?: return
+		val origin = pendingUseOrigin
 		val destination = pendingUseDestination
 		if (clientTicks < pendingUseTick) {
 			return
 		}
 
 		pendingUseTarget = null
+		pendingUseOrigin = null
 		pendingUseDestination = null
 		pendingUseTick = 0L
-		if (!isAlreadyAtLeapDestination(destination)
+		if (isValidLeapPosition(origin, destination)
 			&& client.player != null
 			&& isSpiritLeapHeld(client.player!!)
 		) {
@@ -371,6 +394,7 @@ class AutoLeap : CgcModule(
 	private fun resetRuntime() {
 		pendingLeap = null
 		pendingUseTarget = null
+		pendingUseOrigin = null
 		pendingUseDestination = null
 		pendingUseTick = 0L
 		resetMageCpDetection()
@@ -392,6 +416,7 @@ class AutoLeap : CgcModule(
 		val targetClass: DungeonClass,
 		val runAt: Long,
 		val reason: String,
+		val origin: Phase7?,
 		val destination: Phase7?
 	)
 

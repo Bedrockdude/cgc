@@ -16,20 +16,26 @@ object AutoCNodeUtils {
 			return null
 		}
 
-		val rotation = rotationTo(player.eyePosition, hit.location)
+		val rotation = rotationTo(player.eyePosition, hit.location, player.yRot)
 		return LookedBlock(hit.blockPos, hit.location, rotation.yaw, rotation.pitch)
 	}
 
-	fun rotationTo(from: Vec3, target: Vec3): AutoCRotation {
+	fun rotationTo(from: Vec3, target: Vec3, verticalYaw: Float? = null): AutoCRotation {
 		val dx = target.x - from.x
 		val dy = target.y - from.y
 		val dz = target.z - from.z
 		val horizontal = sqrt(dx * dx + dz * dz)
 		return AutoCRotation(
-			yaw = (-Math.toDegrees(atan2(dx, dz))).toFloat(),
+			yaw = if (horizontal <= VERTICAL_TARGET_EPSILON && verticalYaw != null) {
+				verticalYaw
+			} else {
+				(-Math.toDegrees(atan2(dx, dz))).toFloat()
+			},
 			pitch = (-Math.toDegrees(atan2(dy, horizontal))).toFloat().coerceIn(-90.0f, 90.0f)
 		)
 	}
+
+	private const val VERTICAL_TARGET_EPSILON = 1.0E-4
 
 	fun writePos(pos: Pos): com.google.gson.JsonObject {
 		val obj = com.google.gson.JsonObject()

@@ -3,6 +3,7 @@ package cgc.cgc.module.impl.dungeon
 import cgc.cgc.data.DungeonClass
 import cgc.cgc.data.Phase7
 import cgc.cgc.data.Pos
+import cgc.cgc.client.CgcClient
 import cgc.cgc.dungeon.DungeonState
 import cgc.cgc.dungeon.room.DungeonRoomScanner
 import cgc.cgc.dungeon.room.ScannedDungeonRoom
@@ -29,14 +30,18 @@ import cgc.cgc.module.impl.dungeon.autoc.AutoCStrafeDirection
 import cgc.cgc.module.impl.dungeon.autoc.nodes.BreakNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.CrouchNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.EtherwarpNode
+import cgc.cgc.module.impl.dungeon.autoc.nodes.LookNode
+import cgc.cgc.module.impl.dungeon.autoc.nodes.MovingEtherwarpNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordEvent
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordEventType
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordFrame
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordLookSample
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.StrafeNode
+import cgc.cgc.module.impl.dungeon.autoc.nodes.TrackNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.WalkNode
 import cgc.cgc.module.setting.BooleanSetting
+import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.module.setting.SaveSetting
 import cgc.cgc.runtime.ItemInteractionUtils
 import cgc.cgc.terminal.TerminalContext
@@ -68,6 +73,7 @@ import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket
 import net.minecraft.util.Mth
 import net.minecraft.world.InteractionHand
+import net.minecraft.world.entity.Pose
 import net.minecraft.world.entity.item.ItemEntity
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.Level
@@ -80,6 +86,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.ArrayDeque
 import java.util.Locale
+import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -101,7 +108,8 @@ class AutoC : CgcModule(
 		.create()
 	private val dungeonFloorRoutes = BooleanSetting("Dungeon Floor", true)
 	private val bossFightRoutes = BooleanSetting("Boss Fight", true)
-	private val dungeonFloorConfig = SaveSetting(
+	private val cameraSpeed = NumberSetting("Camera Movement Speed", 0.25, 3.0, 1.0, 0.05, "x")
+	private val dungeonFloorConfig = SaveSetting<MutableMap<String, MutableList<AutoCNode>>>(
 		name = "Dungeon Floor Config",
 		path = "dungeon/auto_c/floor",
 		defaultFile = "default.json",
@@ -126,7 +134,7 @@ class AutoC : CgcModule(
 	private val roomNodes = arrayListOf<AutoCNode>()
 	private val nodes = arrayListOf<AutoCNode>()
 	private val redo = arrayListOf<AutoCNode>()
-	private val lookController = AutoCLookController()
+	private val lookController = AutoCLookController { cameraSpeed.value.toDouble() }
 	private val inputController = AutoCInputController()
 	private val leapMenu = SpiritLeapMenu("AC »") { target -> modMessage("Leaping to $target") }
 	private val nodeContext = object : AutoCNodeContext {
@@ -150,17 +158,30 @@ class AutoC : CgcModule(
 		}
 
 		override fun warp(yaw: Float, pitch: Float) {
-			startUseAction(yaw, pitch, sneak = false, itemIds = listOf("ASPECT_OF_THE_VOID", "ASPECT_OF_THE_END"))
+			startUseAction(yaw, pitch, sneak = false, itemIds = listOf("ASPECT_OF_THE_VOID", "ASPECT_OF_THE_END"), warpLook = true)
 		}
 
-		override fun etherwarp(yaw: Float, pitch: Float, block: BlockPos, target: Vec3) {
+		override fun etherwarp(yaw: Float, pitch: Float, block: BlockPos, target: Vec3, exactlyPos: Boolean) {
 			startUseAction(
 				yaw,
 				pitch,
 				sneak = true,
 				itemIds = listOf("ASPECT_OF_THE_VOID"),
 				targetBlock = block,
-				targetPoint = target
+				targetPoint = target,
+				exactPosition = exactlyPos
+			)
+		}
+
+		override fun movingEtherwarp(yaw: Float, pitch: Float, block: BlockPos, target: Vec3) {
+			startUseAction(
+				yaw,
+				pitch,
+				sneak = true,
+				itemIds = listOf("ASPECT_OF_THE_VOID"),
+				targetBlock = block,
+				targetPoint = target,
+				movingEtherwarp = true
 			)
 		}
 
@@ -178,6 +199,14 @@ class AutoC : CgcModule(
 
 		override fun crouch(seconds: Double) {
 			startCrouchAction(seconds)
+		}
+
+		override fun startWait(seconds: Double) {
+			startRouteWait(seconds)
+		}
+
+		override fun startTrack(seconds: Double, block: BlockPos) {
+			startTrackAction(seconds, block)
 		}
 
 		override fun runCommand(command: String) {
@@ -200,8 +229,8 @@ class AutoC : CgcModule(
 			this@AutoC.stopActions(except)
 		}
 
-		override fun breakBlocks(blocks: List<Pos>, zeroTick: Boolean): Boolean =
-			breakConfiguredBlocks(blocks, zeroTick)
+		override fun breakBlocks(blocks: List<Pos>, zeroTick: Boolean, notMoving: Boolean): Boolean =
+			breakConfiguredBlocks(blocks, zeroTick, notMoving)
 
 		override fun playRecording(frames: List<RecordFrame>): Boolean =
 			startRecordPlayback(frames)
@@ -217,9 +246,11 @@ class AutoC : CgcModule(
 	private var useKeyTicks = 0
 	private var useKeySneak = false
 	private var etherwarpShiftHoldTicks = 0
+	private var movingEtherwarpLookHoldTicks = 0
 	private var interactAction: InteractAction? = null
 	private var queuedInteractAction: InteractAction? = null
 	private var crouchAction: CrouchAction? = null
+	private var trackPlan: TrackPlan? = null
 	private var edgeUntilMs = 0L
 	private var routeWaitUntilMs = 0L
 	private var routeWaitUntilTick = 0
@@ -251,7 +282,7 @@ class AutoC : CgcModule(
 	private var lastPhaseStartSequence = 0L
 
 	init {
-		registerProperty(dungeonFloorRoutes, dungeonFloorConfig, bossFightRoutes, bossFightConfig)
+		registerProperty(dungeonFloorRoutes, cameraSpeed, dungeonFloorConfig, bossFightRoutes, bossFightConfig)
 		loadInitialBossConfig()
 		loadInitialFloorConfig()
 		reload()
@@ -284,9 +315,11 @@ class AutoC : CgcModule(
 			inputController.releaseAll()
 			bonzoAction = null
 			crouchAction = null
+			trackPlan = null
 			useKeyTicks = 0
 			useKeySneak = false
 			etherwarpShiftHoldTicks = 0
+			movingEtherwarpLookHoldTicks = 0
 			awaitSecretCrouchHeld = false
 			autoJumpTicks = 0
 			pendingJumpUntilMs = 0L
@@ -316,6 +349,7 @@ class AutoC : CgcModule(
 
 		val lastPlayerPos = previousPlayerPos
 		updateRouteActiveState(client)
+		updateTrackAction(player)
 		synchronized(nodes) {
 			nodes.forEach { it.updateNodeState(playerPos, tickTime) }
 			handlePhaseStartQueue(player, playerPos)
@@ -364,6 +398,8 @@ class AutoC : CgcModule(
 		if (updateRecordCameraPlayback(player)) {
 			return
 		}
+		updateTrackAction(player)
+		updateMovingEtherwarpAim(player)
 		lookController.update(player)
 	}
 
@@ -447,17 +483,65 @@ class AutoC : CgcModule(
 		clearRuntime()
 	}
 
-	fun addNode(type: AutoCNodeType, args: String = ""): AutoCNode? {
+	fun addNode(type: AutoCNodeType, args: String = ""): AddNodeResult {
 		val client = Minecraft.getInstance()
 		val player = client.player
 		if (player == null) {
 			modMessage("${ChatFormatting.RED}You need to be in-world to add an Auto C node.")
-			return null
+			return AddNodeResult.Failed
 		}
-		val scope = editableScope(client) ?: return null
+		val scope = editableScope(client) ?: return AddNodeResult.Failed
 
 		val placementArgs = parsePlacementArgs(type, args)
-		val node = type.supply(player, placementArgs.args) ?: return null
+		if (type.isEtherwarp() && !player.isShiftKeyDown) {
+			queueCrouchedEtherwarpPlacement(client, type, placementArgs)
+			return AddNodeResult.PendingCrouch
+		}
+		return addNode(type, placementArgs, scope, player)
+	}
+
+	private fun queueCrouchedEtherwarpPlacement(client: Minecraft, type: AutoCNodeType, placementArgs: PlacementArgs) {
+		val sneakKey = client.options.keyShift
+		sneakKey.isDown = true
+		CgcClient.runUntilComplete { currentClient ->
+			val currentPlayer = currentClient.player
+			if (currentPlayer == null || currentClient.level == null) {
+				sneakKey.isDown = false
+				modMessage("${ChatFormatting.RED}Couldn't add the Etherwarp node because you left the world.")
+				return@runUntilComplete true
+			}
+
+			// Keep the generated key held until vanilla has applied the crouching pose. The
+			// ray trace must use that eye position, while retaining the player's camera.
+			sneakKey.isDown = true
+			if (!currentPlayer.isShiftKeyDown || currentPlayer.pose != Pose.CROUCHING) {
+				return@runUntilComplete false
+			}
+
+			val scope = editableScope(currentClient)
+			val result = if (scope == null) {
+				AddNodeResult.Failed
+			} else {
+				addNode(type, placementArgs, scope, currentPlayer)
+			}
+			if (!inputController.physicalDown(currentClient, sneakKey)) {
+				sneakKey.isDown = false
+			}
+			when (result) {
+				is AddNodeResult.Added -> modMessage("Added ${result.node.name()} node at ${result.node.pos.toChatString()}.")
+				else -> modMessage("${ChatFormatting.RED}Failed to add the ${type.commandName} node from the crouched view.")
+			}
+			true
+		}
+	}
+
+	private fun addNode(
+		type: AutoCNodeType,
+		placementArgs: PlacementArgs,
+		scope: RouteScope,
+		player: LocalPlayer
+	): AddNodeResult {
+		val node = type.supply(player, placementArgs.args) ?: return AddNodeResult.Failed
 		if (placementArgs.heightOffset != 0.0) {
 			node.pos.y += placementArgs.heightOffset
 		}
@@ -473,11 +557,11 @@ class AutoC : CgcModule(
 		}
 		if (node is BreakNode && !enabled) {
 			modMessage("${ChatFormatting.RED}Enable Auto C before adding break nodes so block recording can run.")
-			return null
+			return AddNodeResult.Failed
 		}
 		if (node is RecordNode && !enabled) {
 			modMessage("${ChatFormatting.RED}Enable Auto C before adding record nodes so action recording can run.")
-			return null
+			return AddNodeResult.Failed
 		}
 
 		var recordingNode: BreakNode? = null
@@ -501,7 +585,7 @@ class AutoC : CgcModule(
 			is RouteScope.Room -> {
 				val relativeNode = transformNode(node, scope.room, toWorld = false) ?: run {
 					modMessage("${ChatFormatting.RED}Couldn't transform node into ${scope.room.displayName}.")
-					return null
+					return AddNodeResult.Failed
 				}
 				synchronized(nodes) {
 					relativeNode.calculate()
@@ -517,7 +601,7 @@ class AutoC : CgcModule(
 				actionRecordingNode = relativeNode as? RecordNode
 				actionRecordingRoom = scope.room
 			}
-			is RouteScope.UnavailableRoom -> return null
+			is RouteScope.UnavailableRoom -> return AddNodeResult.Failed
 		}
 		if (recordingNode != null) {
 			startBreakRecording(recordingNode, recordingRoom)
@@ -525,7 +609,7 @@ class AutoC : CgcModule(
 		if (actionRecordingNode != null) {
 			startRecordRecording(actionRecordingNode, actionRecordingRoom)
 		}
-		return node
+		return AddNodeResult.Added(node)
 	}
 
 	fun removeNearest(): AutoCNode? {
@@ -1201,7 +1285,10 @@ class AutoC : CgcModule(
 	}
 
 	private fun canRunDuringManualBreak(node: AutoCNode): Boolean =
-		node is WalkNode || node is StrafeNode || node is CrouchNode
+		node is WalkNode
+			|| node is StrafeNode
+			|| node is CrouchNode
+			|| (manualBreakPlan?.notMoving == true && (node is LookNode || node is TrackNode))
 
 	private fun runRouteNode(node: AutoCNode, player: LocalPlayer, playerPos: Pos): Boolean {
 		if (node.notStart && !routeActive) {
@@ -1362,7 +1449,7 @@ class AutoC : CgcModule(
 	}
 
 	private fun updateAwaitSecretCrouch(client: Minecraft) {
-		val shouldHold = hasActiveSecretAwait() && awaitSecretNode is EtherwarpNode
+		val shouldHold = hasActiveSecretAwait() && isEtherwarpNode(awaitSecretNode)
 		if (shouldHold) {
 			inputController.press(client.options.keyShift)
 			awaitSecretCrouchHeld = true
@@ -1439,7 +1526,20 @@ class AutoC : CgcModule(
 	private fun startEtherwarpLook(yaw: Float, pitch: Float) {
 		val player = Minecraft.getInstance().player ?: return
 		walkPlan?.takeIf { !it.looking }?.nodeLookActive = true
-		lookController.startEtherwarp(player, yaw, pitch)
+		val targetDistance = useAction?.targetPoint?.distanceTo(player.eyePosition) ?: ETHERWARP_RAYCAST_RANGE
+		lookController.startEtherwarp(player, yaw, pitch, targetDistance)
+	}
+
+	private fun startWarpLook(yaw: Float, pitch: Float) {
+		val player = Minecraft.getInstance().player ?: return
+		walkPlan?.takeIf { !it.looking }?.nodeLookActive = true
+		lookController.startWarp(player, yaw, pitch)
+	}
+
+	private fun startMovingEtherwarpLook(yaw: Float, pitch: Float) {
+		val player = Minecraft.getInstance().player ?: return
+		walkPlan?.takeIf { !it.looking }?.nodeLookActive = true
+		lookController.startMovingEtherwarp(player, yaw, pitch)
 	}
 
 	private fun startManualBreakLook(yaw: Float, pitch: Float) {
@@ -1465,7 +1565,7 @@ class AutoC : CgcModule(
 
 	private fun updateWalk(client: Minecraft, player: LocalPlayer) {
 		val plan = walkPlan ?: return
-		val breaking = manualBreakPlan != null
+		val breaking = manualBreakPlan?.notMoving == false
 		if (inputController.movementInputDown(client, plan.inputBaseline)) {
 			stopActions()
 			return
@@ -1485,6 +1585,10 @@ class AutoC : CgcModule(
 			if (plan.looking && !plan.nodeLookActive) {
 				return
 			}
+			inputController.press(client.options.keyUp, client.options.keySprint)
+			return
+		}
+		if (plan.nodeLookActive && movingEtherwarpLookHoldTicks > 0) {
 			inputController.press(client.options.keyUp, client.options.keySprint)
 			return
 		}
@@ -1578,7 +1682,10 @@ class AutoC : CgcModule(
 		sneak: Boolean,
 		itemIds: List<String>,
 		targetBlock: BlockPos? = null,
-		targetPoint: Vec3? = null
+		targetPoint: Vec3? = null,
+		movingEtherwarp: Boolean = false,
+		warpLook: Boolean = false,
+		exactPosition: Boolean = false
 	) {
 		val client = Minecraft.getInstance()
 		val player = client.player
@@ -1587,7 +1694,9 @@ class AutoC : CgcModule(
 		var actionPitch = pitch.coerceIn(-90.0f, 90.0f)
 		var actionTargetPoint = targetPoint
 		var useStoredRotation = player == null || targetBlock == null || !isAimingAtBlock(player, targetBlock)
-		if (etherwarp) {
+		if (etherwarp && exactPosition) {
+			useStoredRotation = true
+		} else if (etherwarp) {
 			val activePlayer = player ?: return
 			val block = targetBlock
 			val currentHit = etherwarpBlockHit(activePlayer, block)
@@ -1612,6 +1721,7 @@ class AutoC : CgcModule(
 		inputController.release(client.options.keyAttack)
 		if (!etherwarp) {
 			etherwarpShiftHoldTicks = 0
+			movingEtherwarpLookHoldTicks = 0
 			inputController.release(client.options.keyShift)
 		}
 		useAction = UseAction(
@@ -1622,11 +1732,17 @@ class AutoC : CgcModule(
 			targetBlock = targetBlock,
 			targetPoint = actionTargetPoint,
 			useStoredRotation = useStoredRotation,
-			etherwarp = etherwarp
+			etherwarp = etherwarp,
+			movingEtherwarp = movingEtherwarp,
+			exactPosition = exactPosition
 		)
 		if (useStoredRotation) {
-			if (etherwarp) {
+			if (movingEtherwarp) {
+				startMovingEtherwarpLook(actionYaw, actionPitch)
+			} else if (etherwarp) {
 				startEtherwarpLook(actionYaw, actionPitch)
+			} else if (warpLook) {
+				startWarpLook(actionYaw, actionPitch)
 			} else {
 				startSmoothLook(actionYaw, actionPitch)
 			}
@@ -1691,6 +1807,9 @@ class AutoC : CgcModule(
 		player.yHeadRot = action.yaw
 		pressBonzoUseKey(client)
 		bonzoAction = null
+		walkPlan?.let { walk ->
+			startSmoothLook(walk.yaw, walk.pitch)
+		}
 	}
 
 	private fun selectBonzoStaff(): Boolean =
@@ -1714,6 +1833,7 @@ class AutoC : CgcModule(
 				modMessage("${ChatFormatting.RED}Missing ${action.itemLabel()} in hotbar.")
 				inputController.release(client.options.keyShift)
 				etherwarpShiftHoldTicks = 0
+				if (action.movingEtherwarp) lookController.clear()
 				useAction = null
 				return
 			}
@@ -1727,21 +1847,31 @@ class AutoC : CgcModule(
 			modMessage("${ChatFormatting.RED}Missing ${action.itemLabel()} in hotbar.")
 			inputController.release(client.options.keyShift)
 			etherwarpShiftHoldTicks = 0
+			if (action.movingEtherwarp) lookController.clear()
 			useAction = null
-			return
-		}
-		if (lookController.hasPlan()) {
 			return
 		}
 		if (action.sneak) {
 			inputController.press(client.options.keyShift)
 		}
+		val player = client.player
+		if (action.movingEtherwarp && action.targetBlock != null) {
+			if (player == null || !isMovingEtherwarpReadyToClick(player, action)) {
+				return
+			}
+		} else if (lookController.hasPlan()) {
+			return
+		}
 		client.player?.let { player ->
-			if (action.etherwarp && action.targetBlock != null) {
+			if (!action.movingEtherwarp && action.etherwarp && action.targetBlock != null) {
 				if (!isEtherwarpReadyToClick(player, action)) {
 					return
 				}
-			} else if (!action.useStoredRotation && action.targetBlock != null && !isAimingAtBlock(player, action.targetBlock)) {
+			} else if (!action.movingEtherwarp
+				&& !action.useStoredRotation
+				&& action.targetBlock != null
+				&& !isAimingAtBlock(player, action.targetBlock)
+			) {
 				action.useStoredRotation = true
 				startSmoothLook(action.yaw, action.pitch)
 				return
@@ -1754,8 +1884,76 @@ class AutoC : CgcModule(
 				player.yHeadRot = action.yaw
 			}
 		}
+		if (action.etherwarp) {
+			if (!ItemInteractionUtils.useHeldAir()) {
+				modMessage("${ChatFormatting.RED}Couldn't use the Etherwarp item.")
+				lookController.clear()
+				useAction = null
+				return
+			}
+			etherwarpShiftHoldTicks = maxOf(etherwarpShiftHoldTicks, ETHERWARP_SHIFT_GRACE_TICKS)
+			if (action.movingEtherwarp) {
+				movingEtherwarpLookHoldTicks = 1
+			}
+			useAction = null
+			return
+		}
 		pressUseKey(client, action)
 		useAction = null
+	}
+
+	private fun updateMovingEtherwarpAim(player: LocalPlayer) {
+		val action = useAction?.takeIf { it.movingEtherwarp } ?: return
+		val block = action.targetBlock ?: return
+		if (etherwarpBlockHit(player, block) != null) {
+			return
+		}
+		val aim = visibleEtherwarpAim(player, block, action.targetPoint) ?: return
+		action.yaw = aim.yaw
+		action.pitch = aim.pitch
+		action.targetPoint = aim.point
+		action.useStoredRotation = true
+		lookController.retargetMovingEtherwarp(aim.yaw, aim.pitch)
+	}
+
+	private fun isMovingEtherwarpReadyToClick(player: LocalPlayer, action: UseAction): Boolean {
+		val block = action.targetBlock ?: return true
+		if (!player.isShiftKeyDown || player.pose != Pose.CROUCHING) {
+			return false
+		}
+		etherwarpBlockHit(player, block)?.let { hit ->
+			action.targetPoint = hit.location
+			action.useStoredRotation = false
+			action.aimWaitSinceMs = 0L
+			return true
+		}
+
+		val aim = visibleEtherwarpAim(player, block, action.targetPoint)
+		if (aim != null) {
+			action.yaw = aim.yaw
+			action.pitch = aim.pitch
+			action.targetPoint = aim.point
+			action.useStoredRotation = true
+			action.aimWaitSinceMs = 0L
+			lookController.retargetMovingEtherwarp(aim.yaw, aim.pitch)
+			return false
+		}
+
+		val now = System.currentTimeMillis()
+		if (action.aimWaitSinceMs == 0L) {
+			action.aimWaitSinceMs = now
+		}
+		if (now - action.aimWaitSinceMs < MOVING_ETHERWARP_AIM_WAIT_TIMEOUT_MS) {
+			return false
+		}
+
+		modMessage("${ChatFormatting.RED}Moving Etherwarp target is no longer visible.")
+		inputController.release(Minecraft.getInstance().options.keyShift)
+		etherwarpShiftHoldTicks = 0
+		movingEtherwarpLookHoldTicks = 0
+		lookController.clear()
+		useAction = null
+		return false
 	}
 
 	private fun selectUseItem(action: UseAction): Boolean =
@@ -1776,6 +1974,12 @@ class AutoC : CgcModule(
 	}
 
 	private fun updateUseKeyHold(client: Minecraft) {
+		if (movingEtherwarpLookHoldTicks > 0) {
+			movingEtherwarpLookHoldTicks--
+			if (movingEtherwarpLookHoldTicks <= 0) {
+				lookController.clear()
+			}
+		}
 		if (useKeyTicks <= 0) {
 			updateEtherwarpShiftHold(client)
 			return
@@ -1826,7 +2030,7 @@ class AutoC : CgcModule(
 			return true
 		}
 		nextStackedRouteNode()?.let { node ->
-			return node is EtherwarpNode
+			return isEtherwarpNode(node)
 		}
 		val player = client.player ?: return false
 		val playerPos = Pos(player.position())
@@ -1836,9 +2040,12 @@ class AutoC : CgcModule(
 				.filter { it.isInNode(playerPos) }
 				.filter { !it.isTriggered() && !it.hasRanThisTick(tickTime) }
 				.toList()
-			routeEligibleNodes(triggeredNodes).firstOrNull() is EtherwarpNode
+			isEtherwarpNode(routeEligibleNodes(triggeredNodes).firstOrNull())
 		}
 	}
+
+	private fun isEtherwarpNode(node: AutoCNode?): Boolean =
+		node is EtherwarpNode || node is MovingEtherwarpNode
 
 	private fun nextStackedRouteNode(): AutoCNode? =
 		stackedNodeQueue.firstOrNull { !it.hasRanThisTick(tickTime) && (routeActive || !it.notStart) }
@@ -1865,7 +2072,10 @@ class AutoC : CgcModule(
 			awaitNode = if (await) inNode else null,
 			inputBaseline = inputController.movementInputBaseline(client)
 		)
-		startSmoothLook(yaw, pitch)
+		val player = client.player
+		if (player == null || !isAimingAtBlock(player, block)) {
+			startSmoothLook(yaw, pitch)
+		}
 	}
 
 	private fun updateInteractAction(client: Minecraft, player: LocalPlayer) {
@@ -1951,6 +2161,9 @@ class AutoC : CgcModule(
 		if (lookController.hasPlan()) {
 			return false
 		}
+		if (isAimingAtBlock(player, action.block)) {
+			return false
+		}
 		val yawDiff = abs(Mth.wrapDegrees(player.yRot - action.yaw))
 		val pitchDiff = abs(player.xRot - action.pitch)
 		return yawDiff > INTERACT_MOUSE_CANCEL_DEGREES || pitchDiff > INTERACT_MOUSE_CANCEL_DEGREES
@@ -1989,6 +2202,7 @@ class AutoC : CgcModule(
 			|| interactAction != null
 			|| queuedInteractAction != null
 			|| crouchAction != null
+			|| trackPlan != null
 			|| manualBreakPlan != null
 			|| recordPlayback != null
 			|| lookController.hasPlan()
@@ -2056,6 +2270,52 @@ class AutoC : CgcModule(
 		)
 		inputController.press(client.options.keyShift)
 	}
+
+	private fun startRouteWait(seconds: Double) {
+		if (!seconds.isFinite() || seconds <= 0.0) return
+		routeWaitUntilMs = maxOf(routeWaitUntilMs, System.currentTimeMillis() + secondsToMillis(seconds))
+	}
+
+	private fun startTrackAction(seconds: Double, block: BlockPos) {
+		if (!seconds.isFinite() || seconds <= 0.0) return
+		val now = System.currentTimeMillis()
+		val random = ThreadLocalRandom.current()
+		trackPlan = TrackPlan(
+			block = block,
+			stopAtMs = now + secondsToMillis(seconds),
+			nextAimAtMs = now,
+			offset = Vec3(
+				random.nextDouble(-TRACK_HORIZONTAL_JITTER, TRACK_HORIZONTAL_JITTER),
+				random.nextDouble(-TRACK_VERTICAL_JITTER, TRACK_VERTICAL_JITTER),
+				random.nextDouble(-TRACK_HORIZONTAL_JITTER, TRACK_HORIZONTAL_JITTER)
+			)
+		)
+		startRouteWait(seconds)
+		Minecraft.getInstance().player?.let(::updateTrackAction)
+	}
+
+	private fun updateTrackAction(player: LocalPlayer) {
+		val active = trackPlan ?: return
+		val now = System.currentTimeMillis()
+		if (now >= active.stopAtMs) {
+			trackPlan = null
+			lookController.clear()
+			return
+		}
+		if (now < active.nextAimAtMs) return
+
+		val target = Vec3.atCenterOf(active.block).add(active.offset)
+		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, target, player.yRot)
+		val yawDelta = abs(Mth.wrapDegrees(rotation.yaw - player.yRot))
+		val pitchDelta = abs(rotation.pitch - player.xRot)
+		if (yawDelta > TRACK_AIM_TOLERANCE || pitchDelta > TRACK_AIM_TOLERANCE) {
+			startSmoothLook(rotation.yaw, rotation.pitch)
+		}
+		active.nextAimAtMs = now + ThreadLocalRandom.current().nextLong(TRACK_RETARGET_MIN_MS, TRACK_RETARGET_MAX_MS + 1L)
+	}
+
+	private fun secondsToMillis(seconds: Double): Long =
+		(seconds * 1000.0).toLong().coerceAtLeast(1L)
 
 	private fun updateCrouchAction(client: Minecraft, player: LocalPlayer) {
 		val action = crouchAction ?: return
@@ -2248,12 +2508,16 @@ class AutoC : CgcModule(
 			useKeyTicks = 0
 			useKeySneak = false
 			etherwarpShiftHoldTicks = 0
+			movingEtherwarpLookHoldTicks = 0
 		}
 		if (!preserve.bonzo) {
 			bonzoAction = null
 		}
 		if (!preserve.crouch) {
 			crouchAction = null
+		}
+		if (!preserve.track) {
+			trackPlan = null
 		}
 		if (!preserve.interact) {
 			interactAction = null
@@ -2476,18 +2740,27 @@ class AutoC : CgcModule(
 		pendingJumpUntilMs = 0L
 		lookController.clear()
 		inputController.releaseAll()
+		val startingRotation = frames.first().lookSamples.firstOrNull()?.toRotation()
+			?: RecordRotation(frames.first().yaw, frames.first().pitch)
 		recordPlayback = RecordPlayback(
 			frames = frames.toList(),
 			inputBaseline = inputController.movementInputBaseline(client),
-			initialYaw = player.yRot,
-			initialPitch = player.xRot,
+			initialYaw = startingRotation.yaw,
+			initialPitch = startingRotation.pitch,
 			lastSlot = player.inventory.selectedSlot
 		)
+		startSmoothLook(startingRotation.yaw, startingRotation.pitch)
 		return true
 	}
 
 	private fun updateRecordPlayback(client: Minecraft, player: LocalPlayer): Boolean {
 		val playback = recordPlayback ?: return false
+		if (playback.preparing) {
+			if (lookController.hasPlan()) {
+				return true
+			}
+			playback.preparing = false
+		}
 		if (playback.finished) {
 			finishRecordPlayback(client)
 			return false
@@ -2515,6 +2788,7 @@ class AutoC : CgcModule(
 
 	private fun finishRecordPlayback(client: Minecraft = Minecraft.getInstance()) {
 		recordPlayback = null
+		lookController.clear()
 		inputController.releaseAll()
 	}
 
@@ -2540,6 +2814,9 @@ class AutoC : CgcModule(
 
 	private fun updateRecordCameraPlayback(player: LocalPlayer): Boolean {
 		val playback = recordPlayback ?: return false
+		if (playback.preparing) {
+			return false
+		}
 		val frameIndex = playback.activeFrameIndex
 		if (frameIndex !in playback.frames.indices) {
 			return true
@@ -2741,7 +3018,7 @@ class AutoC : CgcModule(
 		modMessage("Break node recorded ${recording.node.blockCount()} block(s).")
 	}
 
-	private fun breakConfiguredBlocks(blocks: List<Pos>, zeroTick: Boolean): Boolean {
+	private fun breakConfiguredBlocks(blocks: List<Pos>, zeroTick: Boolean, notMoving: Boolean): Boolean {
 		val client = Minecraft.getInstance()
 		val player = client.player ?: return false
 		val level = client.level ?: return false
@@ -2754,8 +3031,8 @@ class AutoC : CgcModule(
 			modMessage("${ChatFormatting.RED}Missing Dungeonbreaker in hotbar.")
 			return false
 		}
-		if (!zeroTick) {
-			manualBreakPlan = ManualBreakPlan(blocks.toMutableList())
+		if (!zeroTick || notMoving) {
+			manualBreakPlan = ManualBreakPlan(blocks.toMutableList(), notMoving = notMoving)
 			useAction = null
 			interactAction = null
 			edgeUntilMs = 0L
@@ -2812,6 +3089,9 @@ class AutoC : CgcModule(
 		}
 		plan.current = target.pos
 		manualBreakTargetReachable(plan, target.distanceSq)
+		if (continueFallingBreakAttack(client, player, level, plan)) {
+			return
+		}
 
 		if (lookController.hasPlan()) {
 			inputController.release(client.options.keyAttack)
@@ -2829,20 +3109,26 @@ class AutoC : CgcModule(
 
 		val aimTarget = manualBreakAimPoint(level, player, current)
 			?: faceVec(closestFace(current.asVec3(), player.eyePosition), current.asVec3())
-		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, aimTarget)
+		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, aimTarget, player.yRot)
 		val targetYaw = manualBreakTargetYaw(rotation.yaw)
 		if (!isManualBreakReady(player, currentBp)) {
 			inputController.release(client.options.keyAttack)
 			if (waitManualBreakOrTimeout(client, plan)) {
 				return
 			}
-			startManualBreakLook(targetYaw, rotation.pitch)
+			if (!plan.notMoving) {
+				startManualBreakLook(targetYaw, rotation.pitch)
+			}
 			return
 		}
 		if (manualBreakTimedOut(client, plan)) {
 			return
 		}
 		inputController.press(client.options.keyAttack)
+		if (!player.onGround() && player.deltaMovement.y < 0.0) {
+			plan.attackHoldTicks = FALLING_BREAK_ATTACK_HOLD_TICKS
+			plan.attackHoldBlock = currentBp
+		}
 	}
 
 	private fun clearManualBreak(client: Minecraft = Minecraft.getInstance()) {
@@ -2865,6 +3151,15 @@ class AutoC : CgcModule(
 
 		val bp = current.asBlockPos()
 		val state = level.getBlockState(bp)
+		if (plan.attackHoldTicks > 0
+			&& plan.attackHoldBlock == bp
+			&& !state.getShape(level, bp).isEmpty
+			&& DungeonBreaker.canInstantMine(state)
+			&& faceDistance(current.asVec3(), player.eyePosition) <= BREAK_RANGE_SQ
+		) {
+			inputController.press(client.options.keyAttack)
+			return
+		}
 		if (state.getShape(level, bp).isEmpty
 			|| !DungeonBreaker.canInstantMine(state)
 			|| faceDistance(current.asVec3(), player.eyePosition) > BREAK_RANGE_SQ
@@ -2872,6 +3167,39 @@ class AutoC : CgcModule(
 		) {
 			inputController.release(client.options.keyAttack)
 		}
+	}
+
+	private fun continueFallingBreakAttack(
+		client: Minecraft,
+		player: LocalPlayer,
+		level: Level,
+		plan: ManualBreakPlan
+	): Boolean {
+		if (plan.attackHoldTicks <= 0) {
+			return false
+		}
+		val current = plan.current
+		val block = current?.asBlockPos()
+		val state = block?.let(level::getBlockState)
+		if (current == null
+			|| block == null
+			|| block != plan.attackHoldBlock
+			|| state == null
+			|| state.getShape(level, block).isEmpty
+			|| !DungeonBreaker.canInstantMine(state)
+			|| faceDistance(current.asVec3(), player.eyePosition) > BREAK_RANGE_SQ
+		) {
+			plan.attackHoldTicks = 0
+			plan.attackHoldBlock = null
+			return false
+		}
+
+		inputController.press(client.options.keyAttack)
+		plan.attackHoldTicks--
+		if (plan.attackHoldTicks <= 0) {
+			plan.attackHoldBlock = null
+		}
+		return true
 	}
 
 	private fun removeBrokenManualBreakBlocks(level: Level, plan: ManualBreakPlan) {
@@ -2953,7 +3281,7 @@ class AutoC : CgcModule(
 	private fun manualBreakAimDelta(level: Level, player: LocalPlayer, pos: Pos): Double {
 		val target = manualBreakAimPoint(level, player, pos)
 			?: faceVec(closestFace(pos.asVec3(), player.eyePosition), pos.asVec3())
-		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, target)
+		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, target, player.yRot)
 		val yawDiff = abs(Mth.wrapDegrees(rotation.yaw - manualBreakTargetYaw(rotation.yaw))).toDouble()
 		val pitchDiff = abs(player.xRot - rotation.pitch).toDouble()
 		return yawDiff * MANUAL_BREAK_YAW_SELECTION_WEIGHT + pitchDiff
@@ -3008,7 +3336,7 @@ class AutoC : CgcModule(
 	}
 
 	private fun manualBreakAimPointScore(player: LocalPlayer, point: Vec3): Double {
-		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, point)
+		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, point, player.yRot)
 		val yawAnchor = walkPlan?.yaw ?: player.yRot
 		val yawDiff = abs(Mth.wrapDegrees(rotation.yaw - yawAnchor)).toDouble()
 		val pitchDiff = abs(player.xRot - rotation.pitch).toDouble()
@@ -3019,6 +3347,8 @@ class AutoC : CgcModule(
 		plan.blockedSinceMs = null
 		plan.closestDistanceSq = Double.POSITIVE_INFINITY
 		plan.reachedBreakRange = false
+		plan.attackHoldTicks = 0
+		plan.attackHoldBlock = null
 	}
 
 	private fun manualBreakTargetReachable(plan: ManualBreakPlan, distanceSq: Double) {
@@ -3035,6 +3365,10 @@ class AutoC : CgcModule(
 
 	private fun waitManualBreakRangeOrTimeout(client: Minecraft, plan: ManualBreakPlan, distanceSq: Double): Boolean {
 		inputController.release(client.options.keyAttack)
+		if (plan.notMoving) {
+			plan.blockedSinceMs = null
+			return false
+		}
 		if (manualBreakStillApproaching(plan, distanceSq)) {
 			return false
 		}
@@ -3055,6 +3389,10 @@ class AutoC : CgcModule(
 
 	private fun waitManualBreakOrTimeout(client: Minecraft, plan: ManualBreakPlan): Boolean {
 		inputController.release(client.options.keyAttack)
+		if (plan.notMoving) {
+			plan.blockedSinceMs = null
+			return false
+		}
 		return manualBreakTimedOut(client, plan)
 	}
 
@@ -3093,14 +3431,19 @@ class AutoC : CgcModule(
 
 	private fun isEtherwarpReadyToClick(player: LocalPlayer, action: UseAction): Boolean {
 		val block = action.targetBlock ?: return true
+		if (!player.isShiftKeyDown || player.pose != Pose.CROUCHING) {
+			return false
+		}
 		etherwarpBlockHit(player, block)?.let { hit ->
-			action.targetPoint = hit.location
-			action.useStoredRotation = false
+			if (!action.exactPosition) {
+				action.targetPoint = hit.location
+				action.useStoredRotation = false
+			}
 			action.aimWaitSinceMs = 0L
 			return true
 		}
 
-		if (action.aimRetries < ETHERWARP_AIM_RETRIES) {
+		if (!action.exactPosition && action.aimRetries < ETHERWARP_AIM_RETRIES) {
 			val aim = visibleEtherwarpAim(player, block, action.targetPoint)
 			if (aim != null) {
 				action.yaw = aim.yaw
@@ -3125,6 +3468,7 @@ class AutoC : CgcModule(
 		modMessage("${ChatFormatting.RED}Etherwarp target is no longer visible.")
 		inputController.release(Minecraft.getInstance().options.keyShift)
 		etherwarpShiftHoldTicks = 0
+		movingEtherwarpLookHoldTicks = 0
 		useAction = null
 		return false
 	}
@@ -3156,7 +3500,7 @@ class AutoC : CgcModule(
 	}
 
 	private fun etherwarpAim(player: LocalPlayer, point: Vec3): EtherwarpAim {
-		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, point)
+		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, point, player.yRot)
 		return EtherwarpAim(point, rotation.yaw, rotation.pitch)
 	}
 
@@ -3199,7 +3543,7 @@ class AutoC : CgcModule(
 	}
 
 	private fun etherwarpAimPointScore(player: LocalPlayer, point: Vec3): Double {
-		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, point)
+		val rotation = AutoCNodeUtils.rotationTo(player.eyePosition, point, player.yRot)
 		val yawDiff = abs(Mth.wrapDegrees(rotation.yaw - player.yRot)).toDouble()
 		val pitchDiff = abs(rotation.pitch - player.xRot).toDouble()
 		return yawDiff + pitchDiff + player.eyePosition.distanceToSqr(point) * 0.002
@@ -3251,9 +3595,11 @@ class AutoC : CgcModule(
 		useAction = null
 		bonzoAction = null
 		crouchAction = null
+		trackPlan = null
 		useKeyTicks = 0
 		useKeySneak = false
 		etherwarpShiftHoldTicks = 0
+		movingEtherwarpLookHoldTicks = 0
 		interactAction = null
 		queuedInteractAction = null
 		manualBreakPlan = null
@@ -3305,6 +3651,12 @@ class AutoC : CgcModule(
 		val entries: MutableList<EditEntry>
 	)
 
+	sealed interface AddNodeResult {
+		data class Added(val node: AutoCNode) : AddNodeResult
+		data object PendingCrouch : AddNodeResult
+		data object Failed : AddNodeResult
+	}
+
 	data class EditEntry(
 		val node: AutoCNode,
 		var index: Int,
@@ -3326,6 +3678,13 @@ class AutoC : CgcModule(
 		val stopAtMs: Long = 0L
 	)
 
+	private data class TrackPlan(
+		val block: BlockPos,
+		val stopAtMs: Long,
+		var nextAimAtMs: Long,
+		val offset: Vec3
+	)
+
 	private data class UseAction(
 		var yaw: Float,
 		var pitch: Float,
@@ -3338,6 +3697,8 @@ class AutoC : CgcModule(
 		var targetPoint: Vec3? = null,
 		var useStoredRotation: Boolean = true,
 		val etherwarp: Boolean = false,
+		val movingEtherwarp: Boolean = false,
+		val exactPosition: Boolean = false,
 		var prepared: Boolean = false,
 		var aimRetries: Int = 0,
 		var aimWaitSinceMs: Long = 0L
@@ -3351,6 +3712,7 @@ class AutoC : CgcModule(
 		val yaw: Float,
 		val pitch: Float
 	)
+
 
 	private data class BonzoAction(
 		val yaw: Float,
@@ -3376,6 +3738,7 @@ class AutoC : CgcModule(
 		val use: Boolean = false,
 		val bonzo: Boolean = false,
 		val crouch: Boolean = false,
+		val track: Boolean = false,
 		val interact: Boolean = false,
 		val breakBlocks: Boolean = false,
 		val record: Boolean = false,
@@ -3395,6 +3758,7 @@ class AutoC : CgcModule(
 					use = use,
 					bonzo = "bonzo" in names,
 					crouch = "crouch" in names,
+					track = "track" in names,
 					interact = interact,
 					breakBlocks = "break" in names,
 					record = "record" in names,
@@ -3433,10 +3797,13 @@ class AutoC : CgcModule(
 
 	private data class ManualBreakPlan(
 		val blocks: MutableList<Pos>,
+		val notMoving: Boolean = false,
 		var current: Pos? = null,
 		var blockedSinceMs: Long? = null,
 		var closestDistanceSq: Double = Double.POSITIVE_INFINITY,
-		var reachedBreakRange: Boolean = false
+		var reachedBreakRange: Boolean = false,
+		var attackHoldTicks: Int = 0,
+		var attackHoldBlock: BlockPos? = null
 	)
 
 	private data class ManualBreakTarget(
@@ -3468,6 +3835,7 @@ class AutoC : CgcModule(
 		var activeFrameIndex: Int = -1,
 		var activeFrameStartedAtNanos: Long = 0L,
 		var lastSlot: Int = 0,
+		var preparing: Boolean = true,
 		var finished: Boolean = false
 	)
 
@@ -3534,6 +3902,11 @@ class AutoC : CgcModule(
 		private const val CROUCH_EDGE_PROBE_RADIUS = 0.035
 		private const val CROUCH_EDGE_PROBE_DEPTH = 0.08
 		private const val CROUCH_EDGE_PROBE_HEIGHT = 0.02
+		private const val TRACK_HORIZONTAL_JITTER = 0.16
+		private const val TRACK_VERTICAL_JITTER = 0.12
+		private const val TRACK_AIM_TOLERANCE = 0.55f
+		private const val TRACK_RETARGET_MIN_MS = 420L
+		private const val TRACK_RETARGET_MAX_MS = 680L
 		private const val EDGE_CHECK_Y_OFFSET = -0.5
 		private const val EDGE_DISTANCE = 0.001
 		private const val BREAK_RANGE_SQ = 25.0
@@ -3542,6 +3915,7 @@ class AutoC : CgcModule(
 		private const val MANUAL_BREAK_YAW_SELECTION_WEIGHT = 2.0
 		private const val MANUAL_BREAK_AIM_INSET = 0.015
 		private const val MANUAL_BREAK_AIM_INSET_FRACTION = 0.08
+		private const val FALLING_BREAK_ATTACK_HOLD_TICKS = 2
 		private const val USE_KEY_HOLD_TICKS = 2
 		private const val BONZO_USE_KEY_HOLD_TICKS = 2
 		private const val ETHERWARP_USE_KEY_HOLD_TICKS = 2
@@ -3558,6 +3932,7 @@ class AutoC : CgcModule(
 		private const val ETHERWARP_RAYCAST_OVERSHOOT = 0.03
 		private const val ETHERWARP_AIM_WAIT_TIMEOUT_MS = 700L
 		private const val ETHERWARP_AIM_RETRIES = 2
+		private const val MOVING_ETHERWARP_AIM_WAIT_TIMEOUT_MS = 1200L
 		private const val RECORD_TICK_NANOS = 50_000_000.0
 		private const val RECORD_LOOK_EPSILON = 0.001f
 		private const val SECRET_ITEM_REMOVE_RANGE_SQ = 64.0

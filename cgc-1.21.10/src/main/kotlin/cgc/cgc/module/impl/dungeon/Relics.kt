@@ -74,6 +74,7 @@ class Relics : CgcModule(
 	private var pendingLeap: PendingLeap? = null
 	private var pendingLeapUse: PendingLeapUse? = null
 	private var pendingPlace: PendingPlace? = null
+	private var placedRelicAwaitingInventoryUpdate: HeldRelic? = null
 
 	init {
 		registerProperty(
@@ -108,6 +109,9 @@ class Relics : CgcModule(
 		}
 
 		val heldRelic = currentRelic(client)
+		if (placedRelicAwaitingInventoryUpdate != heldRelic) {
+			placedRelicAwaitingInventoryUpdate = null
+		}
 		if (heldRelic?.type != lastHeldRelic) {
 			heldRelic?.type?.let { scheduleLeap(it) }
 			lastHeldRelic = heldRelic?.type
@@ -191,7 +195,11 @@ class Relics : CgcModule(
 
 	private fun tryPlaceRelic(client: Minecraft, heldRelic: HeldRelic) {
 		val player = client.player ?: return
-		if (!canInteractNow() || pendingPlace != null || leapMenu.isActive) {
+		if (!canInteractNow()
+			|| pendingPlace != null
+			|| placedRelicAwaitingInventoryUpdate == heldRelic
+			|| leapMenu.isActive
+		) {
 			return
 		}
 
@@ -232,6 +240,7 @@ class Relics : CgcModule(
 		player.inventory.selectedSlot = slot
 		gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit)
 		player.swing(InteractionHand.MAIN_HAND)
+		placedRelicAwaitingInventoryUpdate = HeldRelic(type, slot)
 		lastInteractionAt = System.currentTimeMillis()
 	}
 
@@ -408,6 +417,7 @@ class Relics : CgcModule(
 		pendingLeap = null
 		pendingLeapUse = null
 		pendingPlace = null
+		placedRelicAwaitingInventoryUpdate = null
 	}
 
 	private fun modMessage(message: String) {

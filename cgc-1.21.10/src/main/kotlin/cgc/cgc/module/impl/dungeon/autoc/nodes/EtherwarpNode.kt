@@ -17,10 +17,11 @@ class EtherwarpNode(
 	private val pitch: Float = 0.0f,
 	private val block: Pos = Pos(),
 	private val target: Pos = Pos(),
+	val exactlyPos: Boolean = false,
 	radius: Float = AutoCNode.DEFAULT_RADIUS
 ) : AutoCNode(pos, radius) {
 	override fun run(player: LocalPlayer, playerPos: Pos, context: AutoCNodeContext): Boolean {
-		context.etherwarp(yaw, pitch, block.asBlockPos(), target.asVec3())
+		context.etherwarp(yaw, pitch, block.asBlockPos(), target.asVec3(), exactlyPos)
 		return true
 	}
 
@@ -59,6 +60,7 @@ class EtherwarpNode(
 		json.addProperty("pitch", pitch)
 		json.add("block", AutoCNodeUtils.writePos(block))
 		json.add("target", AutoCNodeUtils.writePos(target))
+		json.addProperty("exactlyPos", exactlyPos)
 		return json
 	}
 
@@ -66,13 +68,17 @@ class EtherwarpNode(
 		val COLOUR = Colour(60, 120, 255)
 
 		fun supply(player: LocalPlayer, args: String): EtherwarpNode? {
+			val tokens = args.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+			val exactlyPos = tokens.singleOrNull()?.equals("exactlyPos", ignoreCase = true) == true
+			if (tokens.size > 1 || (tokens.isNotEmpty() && !exactlyPos)) return null
 			val looked = AutoCNodeUtils.lookedBlock(player) ?: return null
 			return EtherwarpNode(
 				pos = Pos(player.position()),
 				yaw = looked.yaw,
 				pitch = looked.pitch,
 				block = Pos(looked.blockPos),
-				target = Pos(looked.hitPos)
+				target = Pos(looked.hitPos),
+				exactlyPos = exactlyPos
 			)
 		}
 	}

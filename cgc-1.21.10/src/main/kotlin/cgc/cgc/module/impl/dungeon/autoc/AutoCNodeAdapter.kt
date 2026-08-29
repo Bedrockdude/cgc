@@ -14,6 +14,7 @@ import cgc.cgc.module.impl.dungeon.autoc.nodes.InteractNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.JumpNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.LeapNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.LookNode
+import cgc.cgc.module.impl.dungeon.autoc.nodes.MovingEtherwarpNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordEvent
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordEventType
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordFrame
@@ -21,7 +22,9 @@ import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordLookSample
 import cgc.cgc.module.impl.dungeon.autoc.nodes.RecordNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.StopNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.StrafeNode
+import cgc.cgc.module.impl.dungeon.autoc.nodes.TrackNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.UseNode
+import cgc.cgc.module.impl.dungeon.autoc.nodes.WaitNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.WalkNode
 import cgc.cgc.module.impl.dungeon.autoc.nodes.WarpNode
 import com.google.gson.JsonDeserializationContext
@@ -70,6 +73,15 @@ class AutoCNodeAdapter : JsonDeserializer<AutoCNode>, JsonSerializer<AutoCNode> 
 				pitch = obj.get("pitch")?.asFloat ?: 0.0f,
 				block = readPos(obj.get("block")?.asJsonObject),
 				target = readPos(obj.get("target")?.asJsonObject ?: obj.get("block")?.asJsonObject),
+				exactlyPos = obj.get("exactlyPos")?.asBoolean ?: false,
+				radius = radius
+			)
+			"movingetherwarp", "moving_etherwarp" -> MovingEtherwarpNode(
+				pos = pos,
+				yaw = obj.get("yaw")?.asFloat ?: 0.0f,
+				pitch = obj.get("pitch")?.asFloat ?: 0.0f,
+				block = readPos(obj.get("block")?.asJsonObject),
+				target = readPos(obj.get("target")?.asJsonObject ?: obj.get("block")?.asJsonObject),
 				radius = radius
 			)
 			"warp" -> WarpNode(
@@ -107,6 +119,17 @@ class AutoCNodeAdapter : JsonDeserializer<AutoCNode>, JsonSerializer<AutoCNode> 
 				seconds = obj.get("seconds")?.asDouble ?: obj.get("durationSeconds")?.asDouble ?: 0.0,
 				radius = radius
 			)
+			"wait" -> WaitNode(
+				pos = pos,
+				seconds = obj.get("seconds")?.asDouble ?: 0.0,
+				radius = radius
+			)
+			"track" -> TrackNode(
+				pos = pos,
+				seconds = obj.get("seconds")?.asDouble ?: 0.0,
+				block = readPos(obj.get("block")?.asJsonObject),
+				radius = radius
+			)
 			"command" -> CommandNode(
 				pos = pos,
 				command = obj.get("command")?.asString ?: "",
@@ -135,6 +158,7 @@ class AutoCNodeAdapter : JsonDeserializer<AutoCNode>, JsonSerializer<AutoCNode> 
 				zeroTick = obj.get("zeroTick")?.asBoolean ?: true,
 				recordSeconds = obj.get("recordSeconds")?.asDouble ?: 3.0,
 				blocks = readPosList(obj),
+				notMoving = obj.get("notMoving")?.asBoolean ?: false,
 				radius = radius
 			)
 			else -> throw JsonParseException("Unexpected Auto C node type: $type")

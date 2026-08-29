@@ -15,8 +15,10 @@
 		"EditBoxMixin",
 		"FontNickHiderMixin",
 		"InventoryScreenMixin",
+		"KeyboardHandlerMixin",
 		"MinecraftAccessor",
 		"MinecraftTickFreezeMixin",
+		"MouseHandlerMixin",
 		"MultiPlayerGameModeMixin",
 		"PlayerDestroySpeedMixin",
 		"accessor.AccessorAbstractContainerScreen"

@@ -13,12 +13,14 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
+import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.resources.Identifier
 
 object CgcClient : ClientModInitializer {
 	private var pendingScreenDelayTicks = -1
 	private var pendingScreen: (() -> Screen)? = null
+	private val pendingTickTasks = arrayListOf<(Minecraft) -> Boolean>()
 
 	override fun onInitializeClient() {
 		CgcModules.bootstrap()
@@ -31,6 +33,7 @@ object CgcClient : ClientModInitializer {
 
 		ClientTickEvents.END_CLIENT_TICK.register { client ->
 			CgcModules.clientTick(client)
+			pendingTickTasks.removeAll { task -> task(client) }
 
 			if (pendingScreenDelayTicks < 0) return@register
 			if (pendingScreenDelayTicks > 0) {
@@ -80,5 +83,10 @@ object CgcClient : ClientModInitializer {
 	fun openScreenLater(factory: () -> Screen) {
 		pendingScreenDelayTicks = 2
 		pendingScreen = factory
+	}
+
+	/** Runs on every client tick, including when the module which scheduled it is disabled. */
+	fun runUntilComplete(task: (Minecraft) -> Boolean) {
+		pendingTickTasks.add(task)
 	}
 }

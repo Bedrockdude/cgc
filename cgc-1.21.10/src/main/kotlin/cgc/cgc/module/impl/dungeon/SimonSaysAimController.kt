@@ -27,6 +27,17 @@ internal data class AimSettings(
 	val microCorrection: Double
 )
 
+internal data class AimTimingProfile(
+	val minimumSpeed: Double = 0.35,
+	val maximumSpeed: Double = 2.25,
+	val maximumDurationMs: Long? = null
+) {
+	init {
+		require(minimumSpeed > 0.0 && maximumSpeed >= minimumSpeed)
+		require(maximumDurationMs == null || maximumDurationMs > 0L)
+	}
+}
+
 internal data class AimMoveContext(
 	val rowDelta: Int,
 	val columnDelta: Int,
@@ -91,7 +102,8 @@ internal class SimonSaysAimController {
 		settings: AimSettings,
 		mode: AimMode,
 		moveContext: AimMoveContext? = null,
-		nowMs: Long = monotonicNowMs()
+		nowMs: Long = monotonicNowMs(),
+		timing: AimTimingProfile = AimTimingProfile()
 	) {
 		start(
 			start = Rotation(player.yRot, player.xRot.coerceIn(MIN_PITCH, MAX_PITCH)),
@@ -99,7 +111,8 @@ internal class SimonSaysAimController {
 			settings = settings,
 			mode = mode,
 			moveContext = moveContext,
-			nowMs = nowMs
+			nowMs = nowMs,
+			timing = timing
 		)
 	}
 
@@ -110,7 +123,8 @@ internal class SimonSaysAimController {
 		mode: AimMode,
 		moveContext: AimMoveContext? = null,
 		nowMs: Long = monotonicNowMs(),
-		seed: Long = ThreadLocalRandom.current().nextLong()
+		seed: Long = ThreadLocalRandom.current().nextLong(),
+		timing: AimTimingProfile = AimTimingProfile()
 	) {
 		val previousPlan = plan
 		val previousMotion = previousPlan
@@ -126,8 +140,8 @@ internal class SimonSaysAimController {
 		val pitchDelta = (final.pitch - start.pitch).toDouble()
 		val angularDistance = sqrt(yawDelta * yawDelta + pitchDelta * pitchDelta)
 		val random = Random(seed)
-		val safeSettings = settings.coerced()
-		val durationMs = planDurationMs(angularDistance, mode, safeSettings, moveContext, random)
+		val safeSettings = settings.coerced(timing)
+		val durationMs = planDurationMs(angularDistance, mode, safeSettings, moveContext, random, timing)
 		val curveDirection = perpendicularDirection(yawDelta, pitchDelta, angularDistance, random)
 		val curveAmount = curveAmount(angularDistance, mode, safeSettings, random)
 
@@ -269,7 +283,8 @@ internal class SimonSaysAimController {
 		mode: AimMode,
 		settings: AimSettings,
 		moveContext: AimMoveContext?,
-		random: Random
+		random: Random,
+		timing: AimTimingProfile
 	): Long {
 		val baseMs = BASE_DURATION_MS + distance * MS_PER_DEGREE
 		val modeScale = when (mode) {
@@ -297,9 +312,10 @@ internal class SimonSaysAimController {
 		val velocityFloor = distance * QUINTIC_PEAK_VELOCITY_FACTOR / MAX_ANGULAR_SPEED * 1000.0
 		val accelerationFloor = sqrt(distance * QUINTIC_PEAK_ACCELERATION_FACTOR / MAX_ANGULAR_ACCELERATION) * 1000.0
 		val minimum = max(modeMinimumMs(mode), max(velocityFloor, accelerationFloor))
+		val maximum = timing.maximumDurationMs ?: modeMaximumMs(mode)
 		return max(requested, minimum)
 			.toLong()
-			.coerceIn(modeMinimumMs(mode).toLong(), modeMaximumMs(mode))
+			.coerceIn(modeMinimumMs(mode).toLong(), maximum.coerceAtLeast(modeMinimumMs(mode).toLong()))
 	}
 
 	private fun modeMinimumMs(mode: AimMode): Double =
@@ -381,9 +397,9 @@ internal class SimonSaysAimController {
 		)
 	}
 
-	private fun AimSettings.coerced(): AimSettings =
+	private fun AimSettings.coerced(timing: AimTimingProfile): AimSettings =
 		copy(
-			speed = speed.coerceIn(MIN_AIM_SPEED, MAX_AIM_SPEED),
+			speed = speed.coerceIn(timing.minimumSpeed, timing.maximumSpeed),
 			randomness = randomness.coerceIn(0.0, 1.0),
 			overshootStrength = overshootStrength.coerceIn(0.0, 1.3),
 			microCorrection = microCorrection.coerceIn(0.0, 1.0)

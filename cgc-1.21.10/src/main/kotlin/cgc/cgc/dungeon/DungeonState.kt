@@ -22,6 +22,11 @@ object DungeonState {
 	private val players = linkedSetOf<DungeonPlayer>()
 	private var inP3: Boolean = false
 	private var p3SectionIndex: Int = -1
+	private var lastDungeonStartAtMs: Long = Long.MIN_VALUE
+
+	@JvmStatic
+	var runSequence: Long = 0L
+		private set
 
 	@JvmStatic
 	var started: Boolean = false
@@ -49,6 +54,7 @@ object DungeonState {
 
 	@JvmStatic
 	fun reset() {
+		lastDungeonStartAtMs = Long.MIN_VALUE
 		started = false
 		inBoss = false
 		inP3 = false
@@ -58,6 +64,7 @@ object DungeonState {
 		lastF7PhaseStart = Phase7.UNKNOWN
 		lastF7PhaseStartSequence = 0L
 		players.clear()
+		DungeonPuzzleStateTracker.resetTransient()
 	}
 
 	@JvmStatic
@@ -70,12 +77,14 @@ object DungeonState {
 
 		inBoss = isInBossArea(Location.floor, player.position())
 		players.forEach { it.findPlayer() }
+		DungeonPuzzleStateTracker.tick(client, runSequence)
 	}
 
 	@JvmStatic
 	fun handleChat(message: String) {
 		val text = ChatFormatting.stripFormatting(message)?.trim() ?: message.trim()
-		if (text.startsWith("[NPC] Mort: Here, I found this map when I first entered the dungeon.")) {
+		if (text.startsWith(MORT_DUNGEON_START)) {
+			noteDungeonStart(monotonicNowMs())
 			started = true
 			inBoss = false
 			return
@@ -245,6 +254,16 @@ object DungeonState {
 		lastF7PhaseStartSequence++
 	}
 
+	internal fun noteDungeonStart(nowMs: Long): Boolean {
+		if (lastDungeonStartAtMs != Long.MIN_VALUE && nowMs - lastDungeonStartAtMs < DUNGEON_START_DUPLICATE_WINDOW_MS) {
+			return false
+		}
+		lastDungeonStartAtMs = nowMs
+		runSequence++
+		DungeonPuzzleStateTracker.onRunStarted(runSequence)
+		return true
+	}
+
 	private fun p3SectionFromIndex(index: Int): Phase7 =
 		when (index) {
 			0 -> Phase7.S1
@@ -280,4 +299,9 @@ object DungeonState {
 		}
 		return total
 	}
+
+	private const val MORT_DUNGEON_START = "[NPC] Mort: Here, I found this map when I first entered the dungeon."
+	private const val DUNGEON_START_DUPLICATE_WINDOW_MS = 30_000L
+
+	private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
 }

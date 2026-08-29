@@ -17,7 +17,8 @@ interface AutoCNodeContext {
 
 	fun warp(yaw: Float, pitch: Float)
 
-	fun etherwarp(yaw: Float, pitch: Float, block: BlockPos, target: Vec3)
+	fun etherwarp(yaw: Float, pitch: Float, block: BlockPos, target: Vec3, exactlyPos: Boolean)
+	fun movingEtherwarp(yaw: Float, pitch: Float, block: BlockPos, target: Vec3)
 
 	fun interact(yaw: Float, pitch: Float, block: BlockPos, hit: Vec3, await: Boolean)
 
@@ -26,6 +27,10 @@ interface AutoCNodeContext {
 	fun bonzo(yaw: Float, pitch: Float)
 
 	fun crouch(seconds: Double)
+
+	fun startWait(seconds: Double)
+
+	fun startTrack(seconds: Double, block: BlockPos)
 
 	fun runCommand(command: String)
 
@@ -37,7 +42,7 @@ interface AutoCNodeContext {
 
 	fun stopActions(except: Set<String> = emptySet())
 
-	fun breakBlocks(blocks: List<Pos>, zeroTick: Boolean): Boolean
+	fun breakBlocks(blocks: List<Pos>, zeroTick: Boolean, notMoving: Boolean): Boolean
 
 	fun playRecording(frames: List<RecordFrame>): Boolean
 }

@@ -18,10 +18,11 @@ class BreakNode(
 	val zeroTick: Boolean = true,
 	val recordSeconds: Double = DEFAULT_RECORD_SECONDS,
 	private val blocks: MutableList<Pos> = mutableListOf(),
+	val notMoving: Boolean = false,
 	radius: Float = AutoCNode.DEFAULT_RADIUS
 ) : AutoCNode(pos, radius) {
 	override fun run(player: LocalPlayer, playerPos: Pos, context: AutoCNodeContext): Boolean =
-		context.breakBlocks(blocks, zeroTick)
+		context.breakBlocks(blocks, zeroTick, notMoving)
 
 	override fun render(depth: Boolean) {
 		super.render(depth)
@@ -51,6 +52,7 @@ class BreakNode(
 		val json = super.serialize()
 		json.addProperty("zeroTick", zeroTick)
 		json.addProperty("recordSeconds", recordSeconds)
+		json.addProperty("notMoving", notMoving)
 		val array = JsonArray()
 		blocks.forEach { array.add(AutoCNodeUtils.writePos(it)) }
 		json.add("blocks", array)
@@ -77,7 +79,7 @@ class BreakNode(
 
 		fun supply(player: LocalPlayer, args: String): BreakNode? {
 			val split = args.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-			if (split.size != 2) {
+			if (split.size !in 2..3) {
 				return null
 			}
 			val zeroTick = when (split[0].lowercase()) {
@@ -89,7 +91,11 @@ class BreakNode(
 			if (seconds <= 0.0) {
 				return null
 			}
-			return BreakNode(Pos(player.position()), zeroTick, seconds)
+			val notMoving = split.getOrNull(2)?.equals("notMoving", ignoreCase = true) ?: false
+			if (split.size == 3 && !notMoving) {
+				return null
+			}
+			return BreakNode(Pos(player.position()), zeroTick, seconds, notMoving = notMoving)
 		}
 	}
 }

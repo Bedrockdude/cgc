@@ -8,6 +8,7 @@ import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.MultiBufferSource
 import net.minecraft.client.renderer.rendertype.RenderType
 import net.minecraft.client.renderer.rendertype.RenderTypes
+import net.minecraft.client.gui.Font
 import net.minecraft.world.phys.AABB
 import net.minecraft.world.phys.Vec3
 import kotlin.math.cos
@@ -19,6 +20,7 @@ object CgcRenderer3D {
 	private val ringTasks = arrayListOf<RingTask>()
 	private val lineListTasks = arrayListOf<LineListTask>()
 	private val filledTasks = arrayListOf<BoxTask>()
+	private val worldTextTasks = arrayListOf<WorldTextTask>()
 	private val circleCache = hashMapOf<Int, CircleData>()
 
 	fun outlineBox(aabb: AABB, colour: Colour, depth: Boolean) {
@@ -48,15 +50,20 @@ object CgcRenderer3D {
 		ringTasks.add(RingTask(pos, depth, radius, colour, slices, layers))
 	}
 
-	fun lineList(points: List<Vec3>, start: Colour, end: Colour, depth: Boolean) {
-		if (points.size < 2) {
+	fun lineList(points: List<Vec3>, start: Colour, end: Colour, depth: Boolean, width: Float = LINE_WIDTH) {
+		if (points.size < 2 || !width.isFinite() || width <= 0.0f) {
 			return
 		}
-		lineListTasks.add(LineListTask(points.toList(), start, end, depth))
+		lineListTasks.add(LineListTask(points.toList(), start, end, depth, width))
+	}
+
+	fun worldText(text: String, pos: Vec3, colour: Colour, depth: Boolean, scale: Float = 1.0f) {
+		if (text.isBlank() || !scale.isFinite() || scale <= 0.0f) return
+		worldTextTasks.add(WorldTextTask(text, pos, colour, depth, scale))
 	}
 
 	fun render(context: LevelRenderContext) {
-		if (lineTasks.isEmpty() && circleTasks.isEmpty() && ringTasks.isEmpty() && lineListTasks.isEmpty() && filledTasks.isEmpty()) {
+		if (lineTasks.isEmpty() && circleTasks.isEmpty() && ringTasks.isEmpty() && lineListTasks.isEmpty() && filledTasks.isEmpty() && worldTextTasks.isEmpty()) {
 			return
 		}
 
@@ -65,13 +72,16 @@ object CgcRenderer3D {
 		val source = context.bufferSource()
 
 		stack.pushPose()
-		stack.translate(-camera.x, -camera.y, -camera.z)
+		try {
+			stack.translate(-camera.x, -camera.y, -camera.z)
 
-		renderLines(source, stack, camera)
-		renderFilled(source, stack)
-
-		stack.popPose()
-		clear()
+			renderLines(source, stack, camera)
+			renderFilled(source, stack)
+			renderWorldText(source, stack)
+		} finally {
+			stack.popPose()
+			clear()
+		}
 	}
 
 	fun clear() {
@@ -80,6 +90,7 @@ object CgcRenderer3D {
 		ringTasks.clear()
 		lineListTasks.clear()
 		filledTasks.clear()
+		worldTextTasks.clear()
 	}
 
 	private fun renderLines(source: MultiBufferSource.BufferSource, stack: PoseStack, camera: Vec3) {
@@ -124,6 +135,37 @@ object CgcRenderer3D {
 			addFilledBoxVertices(stack.last(), buffer, task.aabb, task.colour)
 		}
 		source.endBatch(type)
+	}
+
+	private fun renderWorldText(source: MultiBufferSource.BufferSource, stack: PoseStack) {
+		if (worldTextTasks.isEmpty()) return
+		val client = Minecraft.getInstance()
+		val camera = client.gameRenderer.mainCamera
+		for (task in worldTextTasks) {
+			stack.pushPose()
+			try {
+				stack.translate(task.pos.x, task.pos.y, task.pos.z)
+				stack.mulPose(camera.rotation())
+				val scale = WORLD_TEXT_SCALE * task.scale
+				stack.scale(-scale, -scale, scale)
+				val x = -client.font.width(task.text) / 2.0f
+				client.font.drawInBatch(
+					task.text,
+					x,
+					0.0f,
+					task.colour.argb(),
+					true,
+					stack.last().pose(),
+					source,
+					if (task.depth) Font.DisplayMode.NORMAL else Font.DisplayMode.SEE_THROUGH,
+					0,
+					FULL_BRIGHT_LIGHT
+				)
+			} finally {
+				stack.popPose()
+			}
+		}
+		source.endBatch()
 	}
 
 	private fun renderOutlineBox(pose: PoseStack.Pose, buffer: VertexConsumer, aabb: AABB, colour: Colour) {
@@ -316,11 +358,11 @@ object CgcRenderer3D {
 			buffer.addVertex(pose, from.x.toFloat(), from.y.toFloat(), from.z.toFloat())
 				.setColor(lerpArgb(start, end, t0))
 				.setNormal(pose, dx, dy, dz)
-				.setLineWidth(LINE_WIDTH)
+				.setLineWidth(task.width)
 			buffer.addVertex(pose, to.x.toFloat(), to.y.toFloat(), to.z.toFloat())
 				.setColor(lerpArgb(start, end, t1))
 				.setNormal(pose, dx, dy, dz)
-				.setLineWidth(LINE_WIDTH)
+				.setLineWidth(task.width)
 		}
 	}
 
@@ -352,7 +394,8 @@ object CgcRenderer3D {
 	private data class BoxTask(val aabb: AABB, val colour: Colour, val depth: Boolean)
 	private data class CircleTask(val pos: Vec3, val depth: Boolean, val radius: Float, val colour: Colour, val slices: Int)
 	private data class RingTask(val pos: Vec3, val depth: Boolean, val radius: Float, val colour: Colour, val slices: Int, val layers: Int)
-	private data class LineListTask(val points: List<Vec3>, val start: Colour, val end: Colour, val depth: Boolean)
+	private data class LineListTask(val points: List<Vec3>, val start: Colour, val end: Colour, val depth: Boolean, val width: Float)
+	private data class WorldTextTask(val text: String, val pos: Vec3, val colour: Colour, val depth: Boolean, val scale: Float)
 
 	private class CircleData(slices: Int) {
 		val x = FloatArray(slices)
@@ -392,4 +435,6 @@ object CgcRenderer3D {
 	)
 
 	private const val LINE_WIDTH = 3.0f
+	private const val WORLD_TEXT_SCALE = 0.025f
+	private const val FULL_BRIGHT_LIGHT = 0x00F000F0
 }

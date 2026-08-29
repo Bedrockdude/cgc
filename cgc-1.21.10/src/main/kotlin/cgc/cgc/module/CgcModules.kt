@@ -6,6 +6,7 @@ import cgc.cgc.terminal.TerminalContext
 import cgc.cgc.module.impl.dungeon.AutoC
 import cgc.cgc.module.impl.dungeon.AutoSSSpecsafe
 import cgc.cgc.module.impl.dungeon.AutoLeap
+import cgc.cgc.module.impl.dungeon.AutoPuzzles
 import cgc.cgc.module.impl.dungeon.AutoTerms
 import cgc.cgc.module.impl.dungeon.BreakerAura
 import cgc.cgc.module.impl.dungeon.DungeonBreaker
@@ -66,6 +67,7 @@ object CgcModules {
 			AutoTerms(),
 			TerminalSolver(),
 			AutoSSSpecsafe(),
+			AutoPuzzles(),
 			SSTriggerBot(),
 			TriggerBot(),
 			EnderPearlTrajectory(),
@@ -189,17 +191,16 @@ object CgcModules {
 	}
 
 	@JvmStatic
-	fun packetSend(packet: Packet<*>): Boolean =
-		run {
-			if (CgcRuntime.packetSend(packet)) {
-				return@run true
-			}
-			manager.all()
-				.asSequence()
-				.filter { it.enabled }
-				.filterIsInstance<PacketSendModule>()
-				.any { it.onPacketSend(packet) }
+	fun packetSend(packet: Packet<*>): Boolean = run {
+		if (CgcRuntime.packetSend(packet)) {
+			return@run true
 		}
+		manager.all()
+			.asSequence()
+			.filter { it.enabled }
+			.filterIsInstance<PacketSendModule>()
+			.any { it.onPacketSend(packet) }
+	}
 
 	private fun pollKeybinds(client: Minecraft) {
 		val window = client.window

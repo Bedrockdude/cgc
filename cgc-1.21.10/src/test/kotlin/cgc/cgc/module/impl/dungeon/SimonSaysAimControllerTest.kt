@@ -99,6 +99,21 @@ class SimonSaysAimControllerTest {
 		}
 	}
 
+	@Test
+	fun `Ice Fill timing profile permits deliberately slow uncapped turns`() {
+		val controller = SimonSaysAimController()
+		controller.start(
+			start = Rotation(0.0f, 0.0f),
+			target = Rotation(60.0f, 0.0f),
+			settings = settings.copy(speed = 0.40),
+			mode = AimMode.NORMAL_BUTTON,
+			nowMs = 1_000L,
+			seed = 4L,
+			timing = AimTimingProfile(minimumSpeed = 0.10, maximumSpeed = 0.80, maximumDurationMs = 5_000L)
+		)
+		assertTrue(controller.currentPlan()!!.durationMs > 260L)
+	}
+
 	private fun controllerFor(start: Rotation, target: Rotation, seed: Long): SimonSaysAimController =
 		SimonSaysAimController().also {
 			it.start(start, target, settings, AimMode.NORMAL_BUTTON, nowMs = 1_000L, seed = seed)
