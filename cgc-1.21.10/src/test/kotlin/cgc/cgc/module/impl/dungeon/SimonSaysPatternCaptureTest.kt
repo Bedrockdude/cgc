@@ -18,12 +18,21 @@ class SimonSaysPatternCaptureTest {
 
 		assertEquals(null, capture.openingSkipPattern())
 		assertEquals(listOf(first, second), capture.openingSkipPattern(allowTwoTransitionVariant = true))
-		assertEquals(second, capture.openingSkipFirstCandidate())
+		assertEquals(null, capture.openingSkipFirstCandidate())
 
 		capture.record(third)
 
 		assertEquals(listOf(second, third), capture.openingSkipPattern())
 		assertEquals(second, capture.openingSkipFirstCandidate())
+	}
+
+	@Test
+	fun `two ambiguous opening lights do not choose a speculative pre aim target`() {
+		val capture = SimonSaysPatternCapture(5)
+		capture.record(first)
+		capture.record(second)
+
+		assertEquals(null, capture.openingSkipFirstCandidate())
 	}
 
 	@Test

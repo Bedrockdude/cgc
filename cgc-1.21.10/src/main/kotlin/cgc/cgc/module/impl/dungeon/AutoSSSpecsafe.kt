@@ -82,6 +82,7 @@ class AutoSSSpecsafe : CgcModule(
 	private val allButtons = arrayListOf<Vec3>()
 	private val practiceButtons = arrayListOf<BlockPos>()
 	private val patternCapture = SimonSaysPatternCapture(FINAL_SEQUENCE_LENGTH)
+	private val inputPhaseTracker = SimonSaysInputPhaseTracker()
 	private val aimController = SimonSaysAimController()
 	private val mouseMotion = VanillaMouseMotion()
 	private val safetyInterlock = AutoSSSafetyInterlock()
@@ -110,6 +111,7 @@ class AutoSSSpecsafe : CgcModule(
 	private var startClicksRemaining = 0
 	private var nextStartClickAt = 0L
 	private var patternSettledAt = 0L
+	private var lastPatternLightAtMs = 0L
 	private var clickedButton: Vec3? = null
 	private var donePopupUntil = 0L
 	private var completedSequenceCount = 0
@@ -162,6 +164,7 @@ class AutoSSSpecsafe : CgcModule(
 		if (!checkSafetyInterlock(client, now, "client_tick")) {
 			return
 		}
+		inputPhaseTracker.observe(client.level!!.getBlockState(DETECT).`is`(Blocks.STONE_BUTTON), now)
 
 		reportDebugStallIfNeeded(client, now)
 		if (tickAutoRestart(now)) {
@@ -415,6 +418,16 @@ class AutoSSSpecsafe : CgcModule(
 
 	private fun handleBlockChange(pos: BlockPos, oldState: BlockState?, newState: BlockState) {
 		acknowledgePendingClickFromBlockUpdate(pos, newState)
+		if (doingSS && areaCheck() && pos == DETECT) {
+			val observedAt = nowMs()
+			inputPhaseTracker.observe(newState.`is`(Blocks.STONE_BUTTON), observedAt)
+			debugEvent(
+				"input_phase_marker",
+				"old=$oldState new=$newState display_seen=${inputPhaseTracker.displayPhaseObserved} input_phase_at_ms=${inputPhaseTracker.inputPhaseObservedAtMs}",
+				progress = newState.`is`(Blocks.STONE_BUTTON),
+				now = observedAt
+			)
+		}
 		if (!doingSS
 			|| !areaCheck()
 			|| !isPatternLightUpdate(pos, newState)
@@ -423,12 +436,14 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
+		val observedAt = nowMs()
 		val button = BlockPos(110, pos.y, pos.z)
 		patternCapture.record(button)
-		markPatternChanged()
+		lastPatternLightAtMs = observedAt
+		markPatternChanged(observedAt)
 		debugEvent(
 			"pattern_light_recorded",
-			"light=${debugPos(pos)} old=$oldState new=$newState button=${debugPos(button)} observation=${patternCapture.observationCount} observations=${debugPattern(patternCapture.observations())} settle_in_ms=${(patternSettledAt - nowMs()).coerceAtLeast(0L)}",
+			"light=${debugPos(pos)} old=$oldState new=$newState button=${debugPos(button)} observation=${patternCapture.observationCount} observations=${debugPattern(patternCapture.observations())} settle_in_ms=${(patternSettledAt - observedAt).coerceAtLeast(0L)}",
 			progress = true
 		)
 		if (startClicksRemaining > 0) {
@@ -454,10 +469,12 @@ class AutoSSSpecsafe : CgcModule(
 			return false
 		}
 
+		val inputPhaseConfirmsPattern = inputPhaseTracker.confirmsPattern(lastPatternLightAtMs)
 		val openingTwoTransitionGraceMs = openingTwoTransitionGraceMs()
+		val openingTwoTransitionTimedOut = now >= patternSettledAt + openingTwoTransitionGraceMs
 		val acceptTwoTransitionOpening = !doneFirst &&
 			patternCapture.observationCount == 2 &&
-			now >= patternSettledAt + openingTwoTransitionGraceMs
+			(inputPhaseConfirmsPattern || openingTwoTransitionTimedOut)
 		val capturedPattern = if (!doneFirst) {
 			patternCapture.openingSkipPattern(acceptTwoTransitionOpening)
 		} else {
@@ -486,7 +503,9 @@ class AutoSSSpecsafe : CgcModule(
 		debugEvent(
 			"pattern_committed",
 			"length=${clicks.size} buttons=${debugPattern(clicks)} opening_two_transition_fallback=$acceptTwoTransitionOpening" +
-				if (acceptTwoTransitionOpening) " grace_ms=$openingTwoTransitionGraceMs" else "",
+				if (acceptTwoTransitionOpening) {
+					" decision=${if (inputPhaseConfirmsPattern) "input_phase_marker" else "timeout"} grace_ms=$openingTwoTransitionGraceMs"
+				} else "",
 			progress = true,
 			now = now
 		)
@@ -552,6 +571,7 @@ class AutoSSSpecsafe : CgcModule(
 			manualRestartRequired = false
 		}
 		doingSS = true
+		inputPhaseTracker.arm(client.level!!.getBlockState(DETECT).`is`(Blocks.STONE_BUTTON))
 		safetyInterlock.arm(
 			position = player.position(),
 			rotation = Rotation(player.yRot, player.xRot),
@@ -1930,8 +1950,8 @@ class AutoSSSpecsafe : CgcModule(
 		}
 	}
 
-	private fun markPatternChanged() {
-		patternSettledAt = nowMs() + randomPatternSettleDelayMs()
+	private fun markPatternChanged(now: Long = nowMs()) {
+		patternSettledAt = now + randomPatternSettleDelayMs()
 	}
 
 	private fun scheduleAutoRestart(): Boolean {
@@ -2204,6 +2224,9 @@ class AutoSSSpecsafe : CgcModule(
 			"click_delay_remaining_ms" to (currentClickDelayMs - (now - lastClickTime)).coerceAtLeast(0L).toString(),
 			"server_safe_spacing_remaining_ms" to (nextServerSafeClickAtMs - now).coerceAtLeast(0L).toString(),
 			"pattern_settle_remaining_ms" to (patternSettledAt - now).coerceAtLeast(0L).toString(),
+			"last_pattern_light_age_ms" to if (lastPatternLightAtMs > 0L) (now - lastPatternLightAtMs).coerceAtLeast(0L).toString() else "none",
+			"input_phase_display_seen" to inputPhaseTracker.displayPhaseObserved.toString(),
+			"input_phase_marker_age_ms" to if (inputPhaseTracker.inputPhaseObservedAtMs > 0L) (now - inputPhaseTracker.inputPhaseObservedAtMs).coerceAtLeast(0L).toString() else "none",
 			"next_start_click_remaining_ms" to (nextStartClickAt - now).coerceAtLeast(0L).toString(),
 			"auto_restart_remaining_ms" to (autoRestartAt - now).coerceAtLeast(0L).toString(),
 			"detect_block_state" to (level?.getBlockState(DETECT)?.toString() ?: "unavailable"),
@@ -2248,12 +2271,14 @@ class AutoSSSpecsafe : CgcModule(
 		clicks.clear()
 		practiceButtons.clear()
 		patternCapture.clear()
+		inputPhaseTracker.clear()
 		clearTarget()
 		safetyInterlock.clear()
 		startAimPoint = null
 		startClicksRemaining = 0
 		nextStartClickAt = 0L
 		patternSettledAt = 0L
+		lastPatternLightAtMs = 0L
 		state = 0
 		doneFirst = false
 		doingSS = false
@@ -2487,7 +2512,7 @@ class AutoSSSpecsafe : CgcModule(
 		private const val MIN_SERVER_TICK_SAMPLE_MS = 20.0
 		private const val MAX_SERVER_TICK_SAMPLE_MS = 500.0
 		private const val SERVER_TICK_SMOOTHING_OLD_WEIGHT = 0.7
-		private const val START_CLICK_INTERVAL_MS = 150L
+		private const val START_CLICK_INTERVAL_MS = 125L
 		private const val AUTO_START_DELAY_RANDOM_EXTRA_MS = 40L
 		private val CONTROL_CODE_PATTERN = Regex("(?i)§[0-9A-FK-OR]")
 

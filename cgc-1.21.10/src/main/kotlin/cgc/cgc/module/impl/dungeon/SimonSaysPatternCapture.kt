@@ -38,15 +38,16 @@ internal class SimonSaysPatternCapture(
 		}
 
 	/**
-	 * Once the skipped button and the next light are known, the latter remains
-	 * the first solve target when the third transition arrives.  This permits
-	 * useful pre-aiming without treating the partial capture as click-safe.
+	 * Returns a pre-aim target only after the opening variant is unambiguous.
+	 * With two observations the common variant would start at the second button,
+	 * while the alternative variant starts at the first, so moving at that point
+	 * causes a visible reversal when the input-phase marker resolves the pattern.
 	 */
 	fun openingSkipFirstCandidate(): BlockPos? =
-		when (observedButtons.size) {
-			0, 1 -> null
-			2 -> observedButtons.last()
-			else -> observedButtons.takeLast(OPENING_SKIP_PATTERN_LENGTH).first()
+		if (observedButtons.size >= OPENING_SKIP_OBSERVATION_COUNT) {
+			observedButtons.takeLast(OPENING_SKIP_PATTERN_LENGTH).first()
+		} else {
+			null
 		}
 
 	fun observations(): List<BlockPos> = observedButtons.toList()
