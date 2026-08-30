@@ -282,6 +282,7 @@ class AutoC : CgcModule(
 	private var lastPhaseStartSequence = 0L
 
 	init {
+		instance = this
 		registerProperty(dungeonFloorRoutes, cameraSpeed, dungeonFloorConfig, bossFightRoutes, bossFightConfig)
 		loadInitialBossConfig()
 		loadInitialFloorConfig()
@@ -313,6 +314,7 @@ class AutoC : CgcModule(
 		}
 		if (client.screen != null) {
 			inputController.releaseAll()
+			clearManualBreak(client, reportSkipped = false)
 			bonzoAction = null
 			crouchAction = null
 			trackPlan = null
@@ -336,6 +338,13 @@ class AutoC : CgcModule(
 
 		tickTime++
 		val playerPos = Pos(player.position())
+		if (breakRecording != null) {
+			// Recording is an explicit player-controlled operation. Do not let an
+			// existing route mine blocks into the recording or start the new node
+			// before its target list has been saved.
+			previousPlayerPos = playerPos
+			return
+		}
 		if (recordRecording != null) {
 			recordSnapshot(client, player)
 			finishRecordRecordingIfNeeded()
@@ -456,6 +465,9 @@ class AutoC : CgcModule(
 	}
 
 	override fun onPacketSend(packet: Packet<*>): Boolean {
+		// Auto C's terminal-exit conditions must keep terminal state even when
+		// neither Auto Terms nor Terminal Solver is enabled.
+		AutoTerms.handleSendForTerminalConsumer(packet)
 		recordActionPacket(packet)
 		if (packet is ServerboundPlayerActionPacket
 			&& packet.action == ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK
@@ -473,6 +485,10 @@ class AutoC : CgcModule(
 			replaceActiveNodes(globalNodes)
 		}
 		clearRuntime()
+		// DungeonState resets its phase sequence on a world change. Keep our
+		// baseline in the same sequence domain without doing this for ordinary
+		// route refreshes, which may happen on the same tick as a phase starts.
+		lastPhaseStartSequence = DungeonState.lastF7PhaseStartSequence
 	}
 
 	override fun onEnable() {
@@ -1542,7 +1558,8 @@ class AutoC : CgcModule(
 		lookController.startMovingEtherwarp(player, yaw, pitch)
 	}
 
-	private fun startManualBreakLook(yaw: Float, pitch: Float) {
+	private fun startManualBreakLook(plan: ManualBreakPlan, yaw: Float, pitch: Float) {
+		plan.ownsLook = true
 		walkPlan?.nodeLookActive = true
 		startSmoothLook(yaw, pitch)
 	}
@@ -2984,6 +3001,7 @@ class AutoC : CgcModule(
 		Math.floorMod(this, divisor)
 
 	private fun startBreakRecording(node: BreakNode, room: ScannedDungeonRoom?) {
+		stopActions()
 		val durationMs = (node.recordSeconds * 1000.0).toLong().coerceAtLeast(1L)
 		breakRecording = BreakRecording(node, System.currentTimeMillis() + durationMs, room)
 		modMessage("Recording broken blocks for ${formatSeconds(node.recordSeconds)}s.")
@@ -2995,6 +3013,11 @@ class AutoC : CgcModule(
 			finishBreakRecordingIfNeeded()
 			return
 		}
+		// Vanilla's prediction may remove an instant-mined block locally before
+		// its START_DESTROY_BLOCK packet reaches this observer. The packet is the
+		// authoritative evidence that the player attempted the break, so do not
+		// reject it based on the post-prediction world state here. Playback filters
+		// targets that are already gone or incompatible with Dungeonbreaker.
 		val storedPos = recording.room?.toRelativeBlock(Pos(pos))?.asBlockPos() ?: pos
 		if (recording.node.addBlock(storedPos)) {
 			modMessage("Recorded block ${Pos(pos).toChatString()}.")
@@ -3011,51 +3034,63 @@ class AutoC : CgcModule(
 			saveRoomNodes(recording.room)
 			synchronized(nodes) {
 				replaceActiveNodes(materializeRoomNodes(recording.room))
+				nodes.firstOrNull { it.id == recording.node.id }?.preTrigger(tickTime)
 			}
 		} else {
 			saveGlobal()
+			synchronized(nodes) {
+				nodes.firstOrNull { it.id == recording.node.id }?.preTrigger(tickTime)
+			}
 		}
 		modMessage("Break node recorded ${recording.node.blockCount()} block(s).")
 	}
 
 	private fun breakConfiguredBlocks(blocks: List<Pos>, zeroTick: Boolean, notMoving: Boolean): Boolean {
 		val client = Minecraft.getInstance()
-		val player = client.player ?: return false
+		client.player ?: return false
 		val level = client.level ?: return false
-		val gameMode = client.gameMode ?: return false
+		client.gameMode ?: return false
 		if (blocks.isEmpty()) {
 			modMessage("${ChatFormatting.RED}Break node has no recorded blocks.")
-			return false
+			// The route node is valid but has no work. Treat it as consumed instead
+			// of retrying it every tick while the player remains in its radius.
+			return true
+		}
+		val uniqueBlocks = blocks.distinctBy { it.asBlockPos() }
+		var unmineable = 0
+		val pendingBlocks = uniqueBlocks.filter { pos ->
+			val block = pos.asBlockPos()
+			val state = level.getBlockState(block)
+			when {
+				state.getShape(level, block).isEmpty -> false
+				!DungeonBreaker.canInstantMine(state) -> {
+					unmineable++
+					false
+				}
+				else -> true
+			}
+		}.toMutableList()
+		if (unmineable > 0) {
+			modMessage("${ChatFormatting.YELLOW}Break node ignored $unmineable block(s) that Dungeonbreaker cannot mine.")
+		}
+		if (pendingBlocks.isEmpty()) {
+			return true
 		}
 		if (!ItemInteractionUtils.selectHotbarItem("DUNGEONBREAKER")) {
 			modMessage("${ChatFormatting.RED}Missing Dungeonbreaker in hotbar.")
-			return false
-		}
-		if (!zeroTick || notMoving) {
-			manualBreakPlan = ManualBreakPlan(blocks.toMutableList(), notMoving = notMoving)
-			useAction = null
-			interactAction = null
-			edgeUntilMs = 0L
-			inputController.release(client.options.keyAttack)
 			return true
 		}
 
-		var broke = false
-		for (pos in blocks) {
-			val bp = pos.asBlockPos()
-			val state = level.getBlockState(bp)
-			if (state.getShape(level, bp).isEmpty || !DungeonBreaker.canInstantMine(state)) {
-				continue
-			}
-			if (faceDistance(pos.asVec3(), player.eyePosition) > BREAK_RANGE_SQ) {
-				continue
-			}
-
-			gameMode.startDestroyBlock(bp, closestFace(pos.asVec3(), player.eyePosition))
-			player.swing(InteractionHand.MAIN_HAND)
-			broke = true
-		}
-		return broke
+		// Both modes use the same bounded plan. Zero-tick performs discrete
+		// vanilla attack attempts; normal mode holds attack while aimed. Keeping
+		// one target at a time avoids repeatedly restarting vanilla's destroy
+		// state and makes completion/failure deterministic.
+		manualBreakPlan = ManualBreakPlan(pendingBlocks, zeroTick = zeroTick, notMoving = notMoving)
+		useAction = null
+		interactAction = null
+		edgeUntilMs = 0L
+		inputController.release(client.options.keyAttack)
+		return true
 	}
 
 	private fun updateManualBreak(client: Minecraft, player: LocalPlayer) {
@@ -3067,7 +3102,7 @@ class AutoC : CgcModule(
 			return
 		}
 
-		removeBrokenManualBreakBlocks(level, plan)
+		removeFinishedManualBreakBlocks(level, plan)
 		if (plan.blocks.isEmpty()) {
 			clearManualBreak(client)
 			return
@@ -3117,11 +3152,16 @@ class AutoC : CgcModule(
 				return
 			}
 			if (!plan.notMoving) {
-				startManualBreakLook(targetYaw, rotation.pitch)
+				startManualBreakLook(plan, targetYaw, rotation.pitch)
 			}
 			return
 		}
 		if (manualBreakTimedOut(client, plan)) {
+			return
+		}
+		if (plan.zeroTick) {
+			inputController.release(client.options.keyAttack)
+			attemptZeroTickBreak(client, player, plan, currentBp)
 			return
 		}
 		inputController.press(client.options.keyAttack)
@@ -3131,9 +3171,37 @@ class AutoC : CgcModule(
 		}
 	}
 
-	private fun clearManualBreak(client: Minecraft = Minecraft.getInstance()) {
+	private fun clearManualBreak(
+		client: Minecraft = Minecraft.getInstance(),
+		reportSkipped: Boolean = true
+	) {
+		val plan = manualBreakPlan
 		manualBreakPlan = null
 		inputController.release(client.options.keyAttack)
+		if (plan?.ownsLook == true) {
+			lookController.clear()
+		}
+		if (reportSkipped && plan != null && plan.skippedBlocks > 0) {
+			modMessage("${ChatFormatting.YELLOW}Break node skipped ${plan.skippedBlocks} block(s) that could not be reached or broken.")
+		}
+	}
+
+	private fun attemptZeroTickBreak(client: Minecraft, player: LocalPlayer, plan: ManualBreakPlan, block: BlockPos) {
+		val now = System.currentTimeMillis()
+		if (plan.attemptsOnCurrent >= ZERO_TICK_BREAK_MAX_ATTEMPTS
+			|| now - plan.lastAttemptAtMs < ZERO_TICK_BREAK_RETRY_MS
+		) {
+			return
+		}
+		val hit = currentBlockHit(player)
+		if (hit?.blockPos != block) {
+			return
+		}
+		val gameMode = client.gameMode ?: return
+		gameMode.startDestroyBlock(block, hit.direction)
+		player.swing(InteractionHand.MAIN_HAND)
+		plan.lastAttemptAtMs = now
+		plan.attemptsOnCurrent++
 	}
 
 	private fun guardManualBreakAttack(client: Minecraft) {
@@ -3144,7 +3212,7 @@ class AutoC : CgcModule(
 			inputController.release(client.options.keyAttack)
 			return
 		}
-		if (lookController.hasPlan()) {
+		if (plan.zeroTick || lookController.hasPlan()) {
 			inputController.release(client.options.keyAttack)
 			return
 		}
@@ -3202,7 +3270,7 @@ class AutoC : CgcModule(
 		return true
 	}
 
-	private fun removeBrokenManualBreakBlocks(level: Level, plan: ManualBreakPlan) {
+	private fun removeFinishedManualBreakBlocks(level: Level, plan: ManualBreakPlan) {
 		val currentBlock = plan.current?.asBlockPos()
 		var removed = false
 		var removedCurrent = false
@@ -3210,9 +3278,15 @@ class AutoC : CgcModule(
 		while (iterator.hasNext()) {
 			val pos = iterator.next()
 			val bp = pos.asBlockPos()
-			if (level.getBlockState(bp).getShape(level, bp).isEmpty) {
+			val state = level.getBlockState(bp)
+			val finished = state.getShape(level, bp).isEmpty
+			val unmineable = !finished && !DungeonBreaker.canInstantMine(state)
+			if (finished || unmineable) {
 				iterator.remove()
 				removed = true
+				if (unmineable) {
+					plan.skippedBlocks++
+				}
 				if (bp == currentBlock) {
 					removedCurrent = true
 				}
@@ -3233,11 +3307,19 @@ class AutoC : CgcModule(
 		}
 	}
 
+	private fun skipManualBreakBlock(plan: ManualBreakPlan, block: BlockPos) {
+		if (plan.blocks.removeAll { it.asBlockPos() == block }) {
+			plan.current = null
+			plan.skippedBlocks++
+			manualBreakProgress(plan)
+		}
+	}
+
 	private fun selectManualBreakTarget(level: Level, player: LocalPlayer, plan: ManualBreakPlan): ManualBreakTarget? {
-		manualBreakCurrentHitTarget(level, player, plan)?.let { return it }
 		manualBreakCandidate(level, player, plan.current)
 			?.takeIf { it.distanceSq <= BREAK_RANGE_SQ }
 			?.let { return it }
+		manualBreakCurrentHitTarget(level, player, plan)?.let { return it }
 
 		plan.current = null
 		return plan.blocks
@@ -3349,6 +3431,8 @@ class AutoC : CgcModule(
 		plan.reachedBreakRange = false
 		plan.attackHoldTicks = 0
 		plan.attackHoldBlock = null
+		plan.lastAttemptAtMs = 0L
+		plan.attemptsOnCurrent = 0
 	}
 
 	private fun manualBreakTargetReachable(plan: ManualBreakPlan, distanceSq: Double) {
@@ -3365,11 +3449,7 @@ class AutoC : CgcModule(
 
 	private fun waitManualBreakRangeOrTimeout(client: Minecraft, plan: ManualBreakPlan, distanceSq: Double): Boolean {
 		inputController.release(client.options.keyAttack)
-		if (plan.notMoving) {
-			plan.blockedSinceMs = null
-			return false
-		}
-		if (manualBreakStillApproaching(plan, distanceSq)) {
+		if (!plan.notMoving && manualBreakStillApproaching(plan, distanceSq)) {
 			return false
 		}
 		return manualBreakTimedOut(client, plan)
@@ -3389,10 +3469,6 @@ class AutoC : CgcModule(
 
 	private fun waitManualBreakOrTimeout(client: Minecraft, plan: ManualBreakPlan): Boolean {
 		inputController.release(client.options.keyAttack)
-		if (plan.notMoving) {
-			plan.blockedSinceMs = null
-			return false
-		}
 		return manualBreakTimedOut(client, plan)
 	}
 
@@ -3400,7 +3476,13 @@ class AutoC : CgcModule(
 		val now = System.currentTimeMillis()
 		val blockedSince = plan.blockedSinceMs ?: now.also { plan.blockedSinceMs = it }
 		if (now - blockedSince >= MANUAL_BREAK_BLOCKED_TIMEOUT_MS) {
-			clearManualBreak(client)
+			val blocked = plan.current?.asBlockPos() ?: plan.blocks.firstOrNull()?.asBlockPos()
+			if (blocked != null) {
+				skipManualBreakBlock(plan, blocked)
+			}
+			if (plan.blocks.isEmpty()) {
+				clearManualBreak(client)
+			}
 			return true
 		}
 		return false
@@ -3624,7 +3706,6 @@ class AutoC : CgcModule(
 		recordPlayback = null
 		terminalExitWindowUntilMs = 0L
 		terminalExitActivatedNodeIds.clear()
-		lastPhaseStartSequence = DungeonState.lastF7PhaseStartSequence
 		if (!TerminalContext.inTerminal) {
 			terminalExitListenerArmed = false
 		}
@@ -3797,13 +3878,18 @@ class AutoC : CgcModule(
 
 	private data class ManualBreakPlan(
 		val blocks: MutableList<Pos>,
+		val zeroTick: Boolean = false,
 		val notMoving: Boolean = false,
 		var current: Pos? = null,
 		var blockedSinceMs: Long? = null,
 		var closestDistanceSq: Double = Double.POSITIVE_INFINITY,
 		var reachedBreakRange: Boolean = false,
 		var attackHoldTicks: Int = 0,
-		var attackHoldBlock: BlockPos? = null
+		var attackHoldBlock: BlockPos? = null,
+		var lastAttemptAtMs: Long = 0L,
+		var attemptsOnCurrent: Int = 0,
+		var skippedBlocks: Int = 0,
+		var ownsLook: Boolean = false
 	)
 
 	private data class ManualBreakTarget(
@@ -3885,7 +3971,18 @@ class AutoC : CgcModule(
 		data class Room(val room: ScannedDungeonRoom) : RouteScope("room:${room.signature}")
 	}
 
-	private companion object {
+	companion object {
+		private var instance: AutoC? = null
+
+		@JvmStatic
+		fun isActive(): Boolean =
+			instance?.enabled == true
+
+		@JvmStatic
+		fun recordBreakAttempt(pos: BlockPos) {
+			instance?.takeIf { it.enabled }?.recordBreakBlock(pos)
+		}
+
 		private const val NODE_DEPTH = true
 		private const val EDIT_RADIUS_SQ = 400.0
 		private const val NODE_ACTIVATION_WINDOW_MS = 60_000L
@@ -3911,6 +4008,8 @@ class AutoC : CgcModule(
 		private const val EDGE_DISTANCE = 0.001
 		private const val BREAK_RANGE_SQ = 25.0
 		private const val MANUAL_BREAK_BLOCKED_TIMEOUT_MS = 750L
+		private const val ZERO_TICK_BREAK_RETRY_MS = 100L
+		private const val ZERO_TICK_BREAK_MAX_ATTEMPTS = 3
 		private const val MANUAL_BREAK_DISTANCE_PROGRESS_EPSILON = 0.0025
 		private const val MANUAL_BREAK_YAW_SELECTION_WEIGHT = 2.0
 		private const val MANUAL_BREAK_AIM_INSET = 0.015

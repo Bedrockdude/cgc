@@ -18,10 +18,14 @@ import java.util.regex.Pattern
 
 object DungeonState {
 	private val tabListPattern = Pattern.compile("^\\[(?<sbLevel>\\d+)] (?:\\[?\\w+] )*(?<name>\\w+) .*?\\((?<class>\\w+)(?: (?<classLevel>\\w+))*\\)$")
-	private val terminalPhasePattern = Pattern.compile("^(.*?) (?:activated|completed) a (terminal|device|lever)! \\((\\d+)/(\\d+)\\)")
+	private val terminalPhasePattern = Pattern.compile(
+		"(?i)^.*?(?:activated|completed) (?:a )?(?:terminal|device|lever)!?\\s*\\((\\d+)/(\\d+)\\)"
+	)
 	private val players = linkedSetOf<DungeonPlayer>()
 	private var inP3: Boolean = false
 	private var p3SectionIndex: Int = -1
+	private var p3SectionAdvanceAwaitingGate = false
+	private var lastP3GateSignalAtMs = Long.MIN_VALUE
 	private var lastDungeonStartAtMs: Long = Long.MIN_VALUE
 
 	@JvmStatic
@@ -59,6 +63,8 @@ object DungeonState {
 		inBoss = false
 		inP3 = false
 		p3SectionIndex = -1
+		p3SectionAdvanceAwaitingGate = false
+		lastP3GateSignalAtMs = Long.MIN_VALUE
 		f7Phase = Phase7.UNKNOWN
 		p3Section = Phase7.UNKNOWN
 		lastF7PhaseStart = Phase7.UNKNOWN
@@ -183,6 +189,7 @@ object DungeonState {
 			"[BOSS] Maxor: WELL! WELL! WELL! LOOK WHO'S HERE!" -> {
 				inP3 = false
 				p3SectionIndex = -1
+				p3SectionAdvanceAwaitingGate = false
 				p3Section = Phase7.UNKNOWN
 				noteF7PhaseStart(Phase7.P1)
 				return
@@ -190,6 +197,7 @@ object DungeonState {
 			"[BOSS] Maxor: I'M TOO YOUNG TO DIE AGAIN!" -> {
 				inP3 = false
 				p3SectionIndex = -1
+				p3SectionAdvanceAwaitingGate = false
 				p3Section = Phase7.UNKNOWN
 				noteF7PhaseStart(Phase7.P2)
 				return
@@ -198,17 +206,35 @@ object DungeonState {
 				f7Phase = Phase7.P3
 				inP3 = true
 				p3SectionIndex = 0
+				p3SectionAdvanceAwaitingGate = false
 				p3Section = Phase7.S1
 				noteF7PhaseStart(Phase7.S1)
 				return
 			}
+			"The gate has been destroyed!" -> {
+				val now = monotonicNowMs()
+				val duplicate = lastP3GateSignalAtMs != Long.MIN_VALUE
+					&& now - lastP3GateSignalAtMs < P3_GATE_DUPLICATE_WINDOW_MS
+				lastP3GateSignalAtMs = now
+				if (inP3 && !duplicate) {
+					if (p3SectionAdvanceAwaitingGate) {
+						// The completed counter already advanced this boundary.
+						p3SectionAdvanceAwaitingGate = false
+					} else {
+						advanceP3Section()
+					}
+				}
+				return
+			}
 			"The Core entrance is opening!" -> {
 				inP3 = false
+				p3SectionAdvanceAwaitingGate = false
 				return
 			}
 			"[BOSS] Necron: I'm afraid, your journey ends now." -> {
 				inP3 = false
 				p3SectionIndex = -1
+				p3SectionAdvanceAwaitingGate = false
 				p3Section = Phase7.UNKNOWN
 				noteF7PhaseStart(Phase7.P4)
 				return
@@ -216,6 +242,7 @@ object DungeonState {
 			"[BOSS] Wither King: I no longer wish to fight, but I know that will not stop you." -> {
 				inP3 = false
 				p3SectionIndex = -1
+				p3SectionAdvanceAwaitingGate = false
 				p3Section = Phase7.UNKNOWN
 				noteF7PhaseStart(Phase7.P5)
 				return
@@ -230,19 +257,30 @@ object DungeonState {
 		if (!matcher.find()) {
 			return
 		}
-		val completed = matcher.group(3).toIntOrNull() ?: return
-		val total = matcher.group(4).toIntOrNull() ?: return
+		val completed = matcher.group(1).toIntOrNull() ?: return
+		val total = matcher.group(2).toIntOrNull() ?: return
 		if (completed != total) {
+			// A new/incomplete counter proves any prior gate acknowledgement is no
+			// longer relevant to the current section.
+			p3SectionAdvanceAwaitingGate = false
 			return
 		}
 
+		if (advanceP3Section()) {
+			p3SectionAdvanceAwaitingGate = true
+		}
+	}
+
+	private fun advanceP3Section(): Boolean {
 		val nextIndex = p3SectionIndex + 1
 		val nextSection = p3SectionFromIndex(nextIndex)
-		if (nextSection != p3Section) {
-			p3SectionIndex = nextIndex
-			p3Section = nextSection
-			noteF7PhaseStart(nextSection)
+		if (nextSection == p3Section) {
+			return false
 		}
+		p3SectionIndex = nextIndex
+		p3Section = nextSection
+		noteF7PhaseStart(nextSection)
+		return true
 	}
 
 	private fun noteF7PhaseStart(phase: Phase7) {
@@ -302,6 +340,7 @@ object DungeonState {
 
 	private const val MORT_DUNGEON_START = "[NPC] Mort: Here, I found this map when I first entered the dungeon."
 	private const val DUNGEON_START_DUPLICATE_WINDOW_MS = 30_000L
+	private const val P3_GATE_DUPLICATE_WINDOW_MS = 1_000L
 
 	private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
 }

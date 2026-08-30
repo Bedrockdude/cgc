@@ -22,16 +22,19 @@ internal class SimonSaysPatternCapture(
 	}
 
 	/**
-	 * A spectator-safe start produces three light transitions: the first is the
-	 * skipped button and the final two are the opening sequence to solve.  Two
-	 * observations are therefore intentionally ambiguous and must never become
-	 * a clickable pattern.
+	 * The usual spectator-safe start produces three light transitions: the first
+	 * is skipped and the final two form the opening sequence. The server can also
+	 * finish the display after only two transitions, in which case both belong to
+	 * the opening sequence. The caller must wait for the input phase and an extra
+	 * grace period before accepting that two-transition variant.
 	 */
-	fun openingSkipPattern(): List<BlockPos>? =
-		if (observedButtons.size >= OPENING_SKIP_OBSERVATION_COUNT) {
-			observedButtons.takeLast(OPENING_SKIP_PATTERN_LENGTH)
-		} else {
-			null
+	fun openingSkipPattern(allowTwoTransitionVariant: Boolean = false): List<BlockPos>? =
+		when {
+			observedButtons.size >= OPENING_SKIP_OBSERVATION_COUNT ->
+				observedButtons.takeLast(OPENING_SKIP_PATTERN_LENGTH)
+			allowTwoTransitionVariant && observedButtons.size == OPENING_SKIP_PATTERN_LENGTH ->
+				observedButtons.toList()
+			else -> null
 		}
 
 	/**

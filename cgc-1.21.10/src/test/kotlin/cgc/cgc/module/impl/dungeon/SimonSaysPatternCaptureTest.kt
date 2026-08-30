@@ -11,12 +11,13 @@ class SimonSaysPatternCaptureTest {
 	private val third = BlockPos(110, 122, 94)
 
 	@Test
-	fun `opening skip waits for all three transitions and discards the first`() {
+	fun `opening skip prefers three transitions and discards the first`() {
 		val capture = SimonSaysPatternCapture(5)
 		capture.record(first)
 		capture.record(second)
 
 		assertEquals(null, capture.openingSkipPattern())
+		assertEquals(listOf(first, second), capture.openingSkipPattern(allowTwoTransitionVariant = true))
 		assertEquals(second, capture.openingSkipFirstCandidate())
 
 		capture.record(third)

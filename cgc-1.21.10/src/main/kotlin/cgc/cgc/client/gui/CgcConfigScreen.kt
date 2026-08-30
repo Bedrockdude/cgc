@@ -99,6 +99,7 @@ private class RsmStylePanel {
 	private val selectedModules = mutableMapOf<ModuleCategory, CgcModule>()
 	private val selectedGroups = mutableMapOf<String, GroupSetting<*>>()
 	private val settingsScroll = mutableMapOf<String, Double>()
+	private val modeDropdownScroll = mutableMapOf<String, Double>()
 	private val hotbarTriggerScroll = mutableMapOf<String, Double>()
 	private val expandedCategories = linkedSetOf<ModuleCategory>()
 	private val modulesByCategory = mutableMapOf<ModuleCategory, List<CgcModule>>()
@@ -120,6 +121,9 @@ private class RsmStylePanel {
 	private var initialized = false
 	private var leftBounds = Bounds.ZERO
 	private var settingsBounds = Bounds.ZERO
+	private var modeDropdownKey: String? = null
+	private var modeDropdownBounds = Bounds.ZERO
+	private var modeDropdownMaxScroll = 0.0
 	private var hotbarTriggerDropdownKey: String? = null
 	private var hotbarTriggerDropdownBounds = Bounds.ZERO
 	private var hotbarTriggerDropdownMaxScroll = 0.0
@@ -131,6 +135,9 @@ private class RsmStylePanel {
 	fun render(gfx: GuiGraphicsExtractor, screenWidth: Int, screenHeight: Int, mouseX: Int, mouseY: Int, progress: Float) {
 		initializeState()
 		hitboxes.clear()
+		modeDropdownKey = null
+		modeDropdownBounds = Bounds.ZERO
+		modeDropdownMaxScroll = 0.0
 		hotbarTriggerDropdownKey = null
 		hotbarTriggerDropdownBounds = Bounds.ZERO
 		hotbarTriggerDropdownMaxScroll = 0.0
@@ -193,6 +200,13 @@ private class RsmStylePanel {
 
 	fun mouseScrolled(mouseX: Double, mouseY: Double, amount: Double): Boolean {
 		val delta = -amount * 23.0
+		val modeKey = modeDropdownKey
+		if (modeKey != null && modeDropdownBounds.contains(mouseX, mouseY)) {
+			val current = modeDropdownScroll.getOrDefault(modeKey, 0.0)
+			modeDropdownScroll[modeKey] = (current - amount * MODE_OPTION_HEIGHT).coerceIn(0.0, modeDropdownMaxScroll)
+			return true
+		}
+
 		val dropdownKey = hotbarTriggerDropdownKey
 		if (dropdownKey != null && hotbarTriggerDropdownBounds.contains(mouseX, mouseY)) {
 			val current = hotbarTriggerScroll.getOrDefault(dropdownKey, 0.0)
@@ -728,19 +742,54 @@ private class RsmStylePanel {
 		})
 		if (!expanded) return
 
-		var optionY = boxY + 21
+		val totalHeight = setting.values.size * MODE_OPTION_HEIGHT
+		val topLimit = settingsBounds.y
+		val bottomLimit = settingsBounds.y + settingsBounds.height - 8
+		val belowY = boxY + 21
+		val belowSpace = bottomLimit - belowY
+		val aboveSpace = boxY - topLimit
+		val openAbove = belowSpace < totalHeight && aboveSpace > belowSpace
+		val availableHeight = if (openAbove) aboveSpace else belowSpace
+		val visibleHeight = min(totalHeight, max(MODE_OPTION_HEIGHT, availableHeight))
+		val listY = if (openAbove) boxY - visibleHeight else belowY
+		val maxScroll = max(0, totalHeight - visibleHeight).toDouble()
+		val scroll = modeDropdownScroll.getOrDefault(row.key, 0.0).coerceIn(0.0, maxScroll)
+		modeDropdownScroll[row.key] = scroll
+		modeDropdownKey = row.key
+		modeDropdownBounds = Bounds(boxX, listY, 200, visibleHeight)
+		modeDropdownMaxScroll = maxScroll
+
+		fill(gfx, boxX, listY, boxX + 200, listY + visibleHeight, Colours.PANEL)
+		hitboxes.add(Hitbox(boxX, listY, 200, visibleHeight) {})
+		enableScissor(gfx, boxX, listY, boxX + 200, listY + visibleHeight)
+		var optionY = listY - scroll.roundToInt()
 		for (option in setting.values) {
-			val hovered = Bounds(boxX, optionY, 200, 18).contains(mouseX.toDouble(), mouseY.toDouble())
-			fill(gfx, boxX, optionY, boxX + 200, optionY + 18, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
+			val visibleTop = max(optionY, listY)
+			val visibleBottom = min(optionY + MODE_OPTION_HEIGHT, listY + visibleHeight)
+			if (visibleBottom <= visibleTop) {
+				optionY += MODE_OPTION_HEIGHT
+				continue
+			}
+			val hovered = Bounds(boxX, visibleTop, 200, visibleBottom - visibleTop).contains(mouseX.toDouble(), mouseY.toDouble())
+			fill(gfx, boxX, optionY, boxX + 200, optionY + MODE_OPTION_HEIGHT, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
 			gfx.text(font(), fit(font(), option, 188), boxX + 5, optionY + 5, if (option == setting.value) Colours.SELECTED else Colours.TEXT, false)
-			hitboxes.add(Hitbox(boxX, optionY, 200, 18) { button ->
+			hitboxes.add(Hitbox(boxX, visibleTop, 200, visibleBottom - visibleTop) { button ->
 				if (button == 0) {
 					setting.value = option
 					setting.onEdit()
 					expandedSettingKey = null
 				}
 			})
-			optionY += 18
+			optionY += MODE_OPTION_HEIGHT
+		}
+		gfx.disableScissor()
+		drawRectOutline(gfx, boxX, listY, 200, visibleHeight, Colours.GROUP_OUTLINE)
+		if (maxScroll > 0.0) {
+			val trackX = boxX + 196
+			val barHeight = max(12, (visibleHeight.toDouble() / totalHeight * visibleHeight).roundToInt())
+			val barY = listY + ((visibleHeight - barHeight) * (scroll / maxScroll)).roundToInt()
+			fill(gfx, trackX, listY + 2, trackX + 2, listY + visibleHeight - 2, Colours.GROUP_OUTLINE)
+			fill(gfx, trackX, barY, trackX + 2, barY + barHeight, Colours.SCROLL_BAR)
 		}
 	}
 
@@ -1406,6 +1455,7 @@ private class RsmStylePanel {
 		private const val CONTROL_X = 114
 		private const val HOTBAR_SWAP_BOX_WIDTH = 448
 		private const val HOTBAR_SWAP_BOX_HEIGHT = 55
+		private const val MODE_OPTION_HEIGHT = 18
 		private const val HOTBAR_TRIGGER_OPTION_HEIGHT = 18
 	}
 

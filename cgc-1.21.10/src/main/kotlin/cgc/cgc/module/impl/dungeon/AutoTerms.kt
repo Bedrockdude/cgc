@@ -831,7 +831,7 @@ class AutoTerms : CgcModule(
 		@JvmStatic
 		fun handleAppliedTerminalPacket(packet: Packet<*>) {
 			val terms = instance ?: return
-			if (!terms.enabled && !TerminalSolver.active) {
+			if (!terms.enabled && !TerminalSolver.active && !AutoC.isActive()) {
 				return
 			}
 			if (terms.handleTerminalPacket(packet) && packet is ClientboundOpenScreenPacket) {
@@ -843,6 +843,11 @@ class AutoTerms : CgcModule(
 
 		@JvmStatic
 		fun handleSendForTerminalSolver(packet: Packet<*>) {
+			handleSendForTerminalConsumer(packet)
+		}
+
+		@JvmStatic
+		fun handleSendForTerminalConsumer(packet: Packet<*>) {
 			val terms = instance ?: return
 			if (!terms.enabled) {
 				terms.handleTerminalSend(packet)

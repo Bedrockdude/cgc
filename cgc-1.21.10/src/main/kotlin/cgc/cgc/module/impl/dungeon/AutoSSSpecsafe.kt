@@ -24,6 +24,7 @@ import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.runtime.CgcRenderPrimitives
 import cgc.cgc.runtime.PacketOrderManager
+import cgc.cgc.runtime.PhysicalInputTracker
 import cgc.cgc.utils.DungeonUtils
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
@@ -83,6 +84,7 @@ class AutoSSSpecsafe : CgcModule(
 	private val patternCapture = SimonSaysPatternCapture(FINAL_SEQUENCE_LENGTH)
 	private val aimController = SimonSaysAimController()
 	private val mouseMotion = VanillaMouseMotion()
+	private val safetyInterlock = AutoSSSafetyInterlock()
 	private val debugRecorder = AutoSSDebugRecorder()
 
 	private var lastClickTime = nowMs()
@@ -129,6 +131,7 @@ class AutoSSSpecsafe : CgcModule(
 	private var lastServerTimePacketAtMs = 0L
 	private var estimatedServerTickMs: Double? = null
 	private var nextServerSafeClickAtMs = 0L
+	private var manualRestartRequired = false
 
 	init {
 		registerProperty(
@@ -154,6 +157,9 @@ class AutoSSSpecsafe : CgcModule(
 			saveDebugFailure("The dungeon area, player, or world became unavailable while Auto SS was running.", client, now)
 			clearAutoRestart()
 			clearTarget()
+			return
+		}
+		if (!checkSafetyInterlock(client, now, "client_tick")) {
 			return
 		}
 
@@ -190,7 +196,7 @@ class AutoSSSpecsafe : CgcModule(
 			return
 		}
 
-		if (!doingSS || client.player!!.distanceToSqr(START_BUTTON) > 25.0) {
+		if (!doingSS) {
 			return
 		}
 
@@ -247,16 +253,20 @@ class AutoSSSpecsafe : CgcModule(
 
 	override fun onWorldRenderStart() {
 		val client = Minecraft.getInstance()
-		if (areaCheck() && targetButton != null && client.player != null) {
-			val button = targetButton
-			if (button != null && targetIsStart && isStartButtonAlreadyAimed(client)) {
-				return
-			}
-			if (button != null && (targetPreAim || targetWaitingForButton) && isCurrentSolveButtonAlreadyAimed(client, button)) {
-				return
-			}
-			latestAimResult = updateAimRotation(client)
+		if (!areaCheck() || client.player == null) {
+			return
 		}
+		if (!checkSafetyInterlock(client, nowMs(), "world_render_start")) {
+			return
+		}
+		val button = targetButton ?: return
+		if (targetIsStart && isStartButtonAlreadyAimed(client)) {
+			return
+		}
+		if ((targetPreAim || targetWaitingForButton) && isCurrentSolveButtonAlreadyAimed(client, button)) {
+			return
+		}
+		latestAimResult = updateAimRotation(client)
 	}
 
 	override fun onWorldRenderExtract(context: LevelRenderContext) {
@@ -296,6 +306,7 @@ class AutoSSSpecsafe : CgcModule(
 	override fun onWorldLoad() {
 		saveDebugFailure("The world changed before Auto SS completed.")
 		resetState()
+		manualRestartRequired = false
 		resetServerTiming()
 	}
 
@@ -308,7 +319,7 @@ class AutoSSSpecsafe : CgcModule(
 	private fun handleChatMessage(message: String) {
 		if (areaCheck() && autoStart.value && Minecraft.getInstance().player != null) {
 			if (message == "[BOSS] Goldor: Who dares trespass into my domain?") {
-				start("boss_chat")
+				start(START_TRIGGER_BOSS_CHAT)
 			}
 		}
 		debugEvent("chat_message", stripControlCodes(message))
@@ -443,8 +454,12 @@ class AutoSSSpecsafe : CgcModule(
 			return false
 		}
 
+		val openingTwoTransitionGraceMs = openingTwoTransitionGraceMs()
+		val acceptTwoTransitionOpening = !doneFirst &&
+			patternCapture.observationCount == 2 &&
+			now >= patternSettledAt + openingTwoTransitionGraceMs
 		val capturedPattern = if (!doneFirst) {
-			patternCapture.openingSkipPattern()
+			patternCapture.openingSkipPattern(acceptTwoTransitionOpening)
 		} else {
 			when (val replay = patternCapture.nextPattern(clicks)) {
 				PatternReplayResult.Incomplete -> return false
@@ -470,7 +485,8 @@ class AutoSSSpecsafe : CgcModule(
 		patternSettledAt = 0L
 		debugEvent(
 			"pattern_committed",
-			"length=${clicks.size} buttons=${debugPattern(clicks)}",
+			"length=${clicks.size} buttons=${debugPattern(clicks)} opening_two_transition_fallback=$acceptTwoTransitionOpening" +
+				if (acceptTwoTransitionOpening) " grace_ms=$openingTwoTransitionGraceMs" else "",
 			progress = true,
 			now = now
 		)
@@ -489,12 +505,13 @@ class AutoSSSpecsafe : CgcModule(
 
 	fun SSR() {
 		if (areaCheck()) {
-			start("reset_key")
+			start(START_TRIGGER_RESET_KEY)
 		}
 	}
 
 	override fun onEnable() {
 		resetState()
+		manualRestartRequired = false
 		resetServerTiming()
 		resetKey.register()
 	}
@@ -503,27 +520,43 @@ class AutoSSSpecsafe : CgcModule(
 		saveDebugFailure("The Auto SS module was disabled before the run completed.")
 		resetKey.unregister()
 		resetState()
+		manualRestartRequired = false
 		resetServerTiming()
 	}
 
 	override fun reset() {
 		saveDebugFailure("The Auto SS module state was reset before the run completed.")
 		resetState()
+		manualRestartRequired = false
 	}
 
 	private fun start(trigger: String) {
 		val client = Minecraft.getInstance()
 		val player = client.player
-		if (player == null || client.level == null || player.distanceToSqr(START_BUTTON) > 25.0) {
+		if (player == null || client.level == null || player.distanceToSqr(AUTO_SS_ACTIVATION_CENTER) > AUTO_SS_ACTIVATION_RADIUS_SQ) {
+			return
+		}
+		if (manualRestartRequired && trigger != START_TRIGGER_RESET_KEY) {
+			return
+		}
+		if (doingSS && trigger == START_TRIGGER_BOSS_CHAT) {
 			return
 		}
 
 		if (debugRecorder.isActive) {
-			saveDebugFailure("A new Auto SS run started before the previous run completed.", client)
+			saveDebugFailure("A new Auto SS run started before the previous run completed (trigger=$trigger).", client)
 		}
 		allButtons.clear()
 		resetState()
+		if (trigger == START_TRIGGER_RESET_KEY) {
+			manualRestartRequired = false
+		}
 		doingSS = true
+		safetyInterlock.arm(
+			position = player.position(),
+			rotation = Rotation(player.yRot, player.xRot),
+			input = PhysicalInputTracker.snapshot()
+		)
 		startAimPoint = getAimPoint(client.level!!, startButtonPos())
 		startClicksRemaining = 3
 		val startedAt = nowMs()
@@ -620,6 +653,7 @@ class AutoSSSpecsafe : CgcModule(
 		val updateAt = nowMs()
 		val result = aimController.update(updateAt)
 		val actual = mouseMotion.apply(client, player, result.rotation)
+		safetyInterlock.recordSolverRotation(actual)
 		val plan = aimController.currentPlan() ?: return null
 		val actualError = angularError(actual, plan.final)
 		val practiceTargetReached = plan.mode == AimMode.PRACTICE &&
@@ -655,6 +689,31 @@ class AutoSSSpecsafe : CgcModule(
 		val yaw = Mth.wrapDegrees(rotation.yaw - target.yaw).toDouble()
 		val pitch = (rotation.pitch - target.pitch).toDouble()
 		return sqrt(yaw * yaw + pitch * pitch)
+	}
+
+	private fun checkSafetyInterlock(client: Minecraft, now: Long, source: String): Boolean {
+		if (!doingSS) {
+			return true
+		}
+		val player = client.player ?: return false
+		val violation = safetyInterlock.check(
+			position = player.position(),
+			rotation = Rotation(player.yRot, player.xRot),
+			input = PhysicalInputTracker.snapshot(),
+			nowMs = now
+		) ?: return true
+
+		val detail = when (violation) {
+			AutoSSSafetyViolation.PLAYER_MOVED ->
+				"the player moved from ${safetyInterlock.startingPosition?.let(::debugVec) ?: "unknown"} to ${debugVec(player.position())}"
+			AutoSSSafetyViolation.UNAUTHORIZED_CAMERA_MOVEMENT ->
+				"the camera moved outside physical mouse input and the Auto SS rotator " +
+					"(expected=${safetyInterlock.expectedRotation?.let(::debugRotation) ?: "unknown"}, actual=${debugRotation(Rotation(player.yRot, player.xRot))})"
+		}
+		debugEvent("safety_interlock", "source=$source violation=$violation detail=$detail")
+		manualRestartRequired = true
+		stopSimonSaysSafely("Auto SS stopped: $detail. Use the Auto SS reset key to restart it.")
+		return false
 	}
 
 	private fun beginLookClick(button: BlockPos, startButton: Boolean) {
@@ -2098,6 +2157,9 @@ class AutoSSSpecsafe : CgcModule(
 		return linkedMapOf(
 			"phase" to debugPhase(now),
 			"doing_ss" to doingSS.toString(),
+			"manual_restart_required" to manualRestartRequired.toString(),
+			"safety_start_position" to (safetyInterlock.startingPosition?.let(::debugVec) ?: "none"),
+			"safety_expected_rotation" to (safetyInterlock.expectedRotation?.let(::debugRotation) ?: "none"),
 			"area_check" to areaCheck().toString(),
 			"player_present" to (player != null).toString(),
 			"world_present" to (level != null).toString(),
@@ -2187,6 +2249,7 @@ class AutoSSSpecsafe : CgcModule(
 		practiceButtons.clear()
 		patternCapture.clear()
 		clearTarget()
+		safetyInterlock.clear()
 		startAimPoint = null
 		startClicksRemaining = 0
 		nextStartClickAt = 0L
@@ -2318,6 +2381,11 @@ class AutoSSSpecsafe : CgcModule(
 		return ThreadLocalRandom.current().nextLong(adaptiveMinimum, adaptiveMaximum + 1L)
 	}
 
+	private fun openingTwoTransitionGraceMs(): Long =
+		((estimatedServerTickMs ?: DEFAULT_SERVER_TICK_MS) * OPENING_TWO_TRANSITION_GRACE_SERVER_TICKS)
+			.toLong()
+			.coerceIn(MIN_OPENING_TWO_TRANSITION_GRACE_MS, MAX_OPENING_TWO_TRANSITION_GRACE_MS)
+
 	private fun randomServerSafeClickSpacingMs(): Long {
 		val serverTickSpacing = estimatedServerTickMs
 			?.times(SERVER_SAFE_CLICK_TICK_MULTIPLIER)
@@ -2349,11 +2417,15 @@ class AutoSSSpecsafe : CgcModule(
 
 	private companion object {
 		private val START_BUTTON = Vec3(110.875, 121.5, 91.5)
+		private val AUTO_SS_ACTIVATION_CENTER = Vec3(107.0, 120.0, 94.0)
 		private val DETECT = BlockPos(110, 120, 93)
 		private val INPUT_BUTTONS = (120..123).flatMap { y ->
 			(92..95).map { z -> BlockPos(110, y, z) }
 		}
 		private const val MAX_BUTTON_DISTANCE_SQ = 36.0
+		private const val AUTO_SS_ACTIVATION_RADIUS_SQ = 9.0
+		private const val START_TRIGGER_BOSS_CHAT = "boss_chat"
+		private const val START_TRIGGER_RESET_KEY = "reset_key"
 		private const val RAYCAST_DISTANCE = 6.0
 		private const val START_BUTTON_FACE_RAY_EPSILON = 1.0E-5
 		private const val START_BUTTON_PHYSICAL_HALF_HEIGHT = 0.145
@@ -2395,6 +2467,10 @@ class AutoSSSpecsafe : CgcModule(
 		private const val PATTERN_SETTLE_JITTER_MS = 40L
 		private const val PATTERN_SETTLE_ACK_PERCENT = 45L
 		private const val PATTERN_SETTLE_SERVER_TICK_MULTIPLIER = 1.05
+		private const val DEFAULT_SERVER_TICK_MS = 50.0
+		private const val OPENING_TWO_TRANSITION_GRACE_SERVER_TICKS = 30.0
+		private const val MIN_OPENING_TWO_TRANSITION_GRACE_MS = 1_500L
+		private const val MAX_OPENING_TWO_TRANSITION_GRACE_MS = 3_000L
 		private const val MIN_ACK_SAMPLE_MS = 1L
 		private const val MAX_ACK_SAMPLE_MS = 2000L
 		private const val MIN_PENDING_CLICK_TIMEOUT_MS = 6000L

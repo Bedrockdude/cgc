@@ -13,6 +13,7 @@ import net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
+import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
@@ -27,6 +28,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(ClientPacketListener.class)
 public class ClientPacketListenerMixin {
+	@Inject(method = "setSubtitleText", at = @At("TAIL"))
+	private void cgc$onSetSubtitleTextHandlerTail(ClientboundSetSubtitleTextPacket packet, CallbackInfo ci) {
+		DungeonState.handleChat(packet.text().getString());
+	}
+
 	@Inject(method = "handleOpenScreen", at = @At("TAIL"))
 	private void cgc$onOpenScreenHandlerTail(ClientboundOpenScreenPacket packet, CallbackInfo ci) {
 		TerminalTimes.observePacketHandlerTail(packet);

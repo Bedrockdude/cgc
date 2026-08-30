@@ -16,9 +16,9 @@ import cgc.cgc.module.setting.BooleanSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.NumberSetting
 import cgc.cgc.module.setting.StringSetting
+import cgc.cgc.runtime.ItemInteractionUtils
 import cgc.cgc.utils.ChatUtils
 import cgc.cgc.utils.DungeonUtils
-import cgc.cgc.utils.ItemUtils
 import cgc.cgc.utils.SpiritLeapMenu
 import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
@@ -30,7 +30,6 @@ import net.minecraft.util.Mth
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.decoration.ArmorStand
-import net.minecraft.world.entity.player.Player
 import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.EntityHitResult
 import net.minecraft.world.phys.HitResult
@@ -51,7 +50,6 @@ class Relics : CgcModule(
 	private val range = NumberSetting("Range", 1.0, 6.0, 4.5, 0.1)
 	private val clickDelay = NumberSetting("Click Delay", 0.0, 1000.0, 150.0, 25.0, " ms")
 	private val relicSlot = NumberSetting("Relic Slot", 1.0, 9.0, 9.0, 1.0)
-	private val leapSlot = NumberSetting("Leap Slot", 1.0, 9.0, 8.0, 1.0, supplier = { autoLeap.value })
 	private val leapDelay = NumberSetting("Leap Delay", 0.0, 2000.0, 250.0, 25.0, " ms", supplier = { autoLeap.value })
 	private val redLeap = ModeSetting("Red Leap", "None", LEAP_MODES, supplier = { autoLeap.value })
 	private val redCustom = StringSetting("Red Custom", "", maxLength = 64, supplier = { autoLeap.value && redLeap.isMode("Custom") })
@@ -84,7 +82,6 @@ class Relics : CgcModule(
 			range,
 			clickDelay,
 			relicSlot,
-			leapSlot,
 			leapDelay,
 			redLeap,
 			redCustom,
@@ -254,13 +251,13 @@ class Relics : CgcModule(
 			return
 		}
 
-		if (leapTarget(type) == null) {
+		if (!hasConfiguredLeapTarget(type)) {
 			return
 		}
 
 		lastPickupRelic = type
 		lastPickupAt = now
-		pendingLeap = PendingLeap(type, now + leapDelay.value.toLong(), now)
+		pendingLeap = PendingLeap(type, now + leapDelay.value.toLong())
 	}
 
 	private fun runPendingLeap(client: Minecraft) {
@@ -270,8 +267,9 @@ class Relics : CgcModule(
 			return
 		}
 
-		if (now - leap.createdAt > PENDING_LEAP_TIMEOUT_MS) {
+		if (now - leap.runAt > PENDING_LEAP_TIMEOUT_MS) {
 			pendingLeap = null
+			modMessage("${ChatFormatting.RED}Could not find the configured ${leapMode(leap.type).value} leap target.")
 			return
 		}
 
@@ -279,10 +277,7 @@ class Relics : CgcModule(
 			return
 		}
 
-		val target = leapTarget(leap.type) ?: run {
-			pendingLeap = null
-			return
-		}
+		val target = leapTarget(leap.type) ?: return
 
 		pendingLeap = null
 		startLeap(client, target)
@@ -294,13 +289,19 @@ class Relics : CgcModule(
 			return
 		}
 
-		pendingLeapUse = null
 		val player = client.player ?: return
-		if (!isSpiritLeap(player)) {
-			modMessage("${ChatFormatting.RED}Leap slot does not contain a spirit leap.")
+		val previousSlot = player.inventory.selectedSlot
+		if (!ItemInteractionUtils.selectHotbarItem(*LEAP_ITEM_IDS)) {
+			pendingLeapUse = null
+			modMessage("${ChatFormatting.RED}No spirit leap was found in your hotbar.")
+			return
+		}
+		if (player.inventory.selectedSlot != previousSlot) {
+			pendingLeapUse = use.copy(useAtTick = clientTicks + SLOT_SETTLE_TICKS)
 			return
 		}
 
+		pendingLeapUse = null
 		leapMenu.start(use.target)
 	}
 
@@ -310,15 +311,14 @@ class Relics : CgcModule(
 			return
 		}
 
-		val slot = hotbarIndex(leapSlot)
-		if (player.inventory.selectedSlot != slot) {
-			player.inventory.selectedSlot = slot
-			pendingLeapUse = PendingLeapUse(target, clientTicks + SLOT_SETTLE_TICKS)
+		val previousSlot = player.inventory.selectedSlot
+		if (!ItemInteractionUtils.selectHotbarItem(*LEAP_ITEM_IDS)) {
+			modMessage("${ChatFormatting.RED}No spirit leap was found in your hotbar.")
 			return
 		}
 
-		if (!isSpiritLeap(player)) {
-			modMessage("${ChatFormatting.RED}Leap slot does not contain a spirit leap.")
+		if (player.inventory.selectedSlot != previousSlot) {
+			pendingLeapUse = PendingLeapUse(target, clientTicks + SLOT_SETTLE_TICKS)
 			return
 		}
 
@@ -326,24 +326,43 @@ class Relics : CgcModule(
 	}
 
 	private fun leapTarget(type: RelicType): String? {
-		val (mode, custom) = when (type) {
-			RelicType.RED -> redLeap to redCustom
-			RelicType.ORANGE -> orangeLeap to orangeCustom
-			RelicType.GREEN -> greenLeap to greenCustom
-			RelicType.BLUE -> blueLeap to blueCustom
-			RelicType.PURPLE -> purpleLeap to purpleCustom
-		}
+		val mode = leapMode(type)
+		val custom = leapCustom(type)
 
 		if (mode.isMode("None")) {
 			return null
 		}
 
 		if (mode.isMode("Custom")) {
-			return custom.value.trim().takeIf { it.isNotBlank() }
+			return custom.value.trim()
+				.takeIf { it.isNotBlank() && !isLocalPlayer(it) }
 		}
 
 		val clazz = classFromMode(mode.value)
-		return DungeonState.getClassPlayer(clazz)?.name
+		return DungeonState.getPlayers()
+			.firstOrNull { it.dungeonClass.sameClass(clazz) && !isLocalPlayer(it.name) }
+			?.name
+	}
+
+	private fun hasConfiguredLeapTarget(type: RelicType): Boolean {
+		val mode = leapMode(type)
+		return !mode.isMode("None") && (!mode.isMode("Custom") || leapCustom(type).value.isNotBlank())
+	}
+
+	private fun leapMode(type: RelicType): ModeSetting = when (type) {
+		RelicType.RED -> redLeap
+		RelicType.ORANGE -> orangeLeap
+		RelicType.GREEN -> greenLeap
+		RelicType.BLUE -> blueLeap
+		RelicType.PURPLE -> purpleLeap
+	}
+
+	private fun leapCustom(type: RelicType): StringSetting = when (type) {
+		RelicType.RED -> redCustom
+		RelicType.ORANGE -> orangeCustom
+		RelicType.GREEN -> greenCustom
+		RelicType.BLUE -> blueCustom
+		RelicType.PURPLE -> purpleCustom
 	}
 
 	private fun currentRelic(client: Minecraft): HeldRelic? {
@@ -392,16 +411,14 @@ class Relics : CgcModule(
 	private fun hotbarIndex(setting: NumberSetting): Int =
 		Mth.clamp(setting.value.toInt(), 1, 9) - 1
 
-	private fun isSpiritLeap(player: Player): Boolean {
-		val itemId = ItemUtils.skyBlockId(player.inventory.selectedItem)
-		return itemId == "SPIRIT_LEAP" || itemId == "INFINITE_SPIRIT_LEAP"
-	}
-
 	private fun isOwnPickup(actor: String): Boolean {
 		val name = Minecraft.getInstance().player?.name?.string ?: return false
 		return actor.equals(name, ignoreCase = true)
 			|| actor.lowercase(Locale.ROOT).endsWith(" ${name.lowercase(Locale.ROOT)}")
 	}
+
+	private fun isLocalPlayer(name: String): Boolean =
+		Minecraft.getInstance().player?.name?.string?.equals(name, ignoreCase = true) == true
 
 	private fun areaCheck(): Boolean =
 		Location.area.isArea(Island.DUNGEON)
@@ -425,7 +442,7 @@ class Relics : CgcModule(
 	}
 
 	private data class HeldRelic(val type: RelicType, val slot: Int)
-	private data class PendingLeap(val type: RelicType, val runAt: Long, val createdAt: Long)
+	private data class PendingLeap(val type: RelicType, val runAt: Long)
 	private data class PendingLeapUse(val target: String, val useAtTick: Long)
 	private data class PendingPlace(val type: RelicType, val slot: Int, val useAtTick: Long)
 
@@ -452,7 +469,11 @@ class Relics : CgcModule(
 
 	private companion object {
 		private val LEAP_MODES = listOf("None", "Archer", "Mage", "Berserk", "Healer", "Tank", "Custom")
-		private val PICKUP_PATTERN = Pattern.compile("^(\\w{3,16}) picked the Corrupted (\\w{3,6}) Relic!$")
+		private val LEAP_ITEM_IDS = arrayOf("INFINITE_SPIRIT_LEAP", "SPIRIT_LEAP")
+		private val PICKUP_PATTERN = Pattern.compile(
+			"^(.+?) picked the Corrupted (Red|Orange|Green|Blue|Purple) Relic!$",
+			Pattern.CASE_INSENSITIVE
+		)
 		private const val SLOT_SETTLE_TICKS = 2L
 		private const val MENU_TIMEOUT_MS = 1500L
 		private const val PENDING_LEAP_TIMEOUT_MS = 3000L
