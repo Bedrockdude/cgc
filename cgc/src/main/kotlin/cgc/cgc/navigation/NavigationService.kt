@@ -344,7 +344,7 @@ object NavigationService {
 		aimController.start(
 			player = player,
 			target = point,
-			settings = AimSettings(speed = 1.65, randomness = 0.08, overshootStrength = 0.7, microCorrection = 0.55),
+			settings = AimSettings(speed = 1.65, randomness = 0.08, overshootStrength = 0.7),
 			mode = AimMode.CHAINED_RETARGET,
 			nowMs = System.nanoTime() / 1_000_000L,
 			timing = AimTimingProfile(minimumSpeed = 0.18, maximumSpeed = 2.25, maximumDurationMs = 800L)

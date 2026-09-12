@@ -30,8 +30,7 @@ class AutoPuzzleAimController {
 			settings = AimSettings(
 				speed = speed,
 				randomness = if (profile == AutoPuzzleAimProfile.ICE_TURN) 0.08 else 0.18,
-				overshootStrength = 0.9,
-				microCorrection = 0.55
+				overshootStrength = 0.9
 			),
 			mode = when (profile) {
 				AutoPuzzleAimProfile.CHAINED -> AimMode.CHAINED_RETARGET

@@ -13,9 +13,7 @@ internal enum class AimMode {
 	NORMAL_BUTTON,
 	CHAINED_RETARGET,
 	PRE_AIM,
-	WAIT_CORRECTION,
-	PRACTICE,
-	PRACTICE_RETURN
+	WAIT_CORRECTION
 }
 
 internal data class Rotation(val yaw: Float, val pitch: Float)
@@ -23,8 +21,7 @@ internal data class Rotation(val yaw: Float, val pitch: Float)
 internal data class AimSettings(
 	val speed: Double,
 	val randomness: Double,
-	val overshootStrength: Double,
-	val microCorrection: Double
+	val overshootStrength: Double
 )
 
 internal data class AimTimingProfile(
@@ -38,16 +35,24 @@ internal data class AimTimingProfile(
 	}
 }
 
+internal data class AimMotionProfile(
+	val durationScale: Double = 1.0,
+	val startVelocityFactor: Double = 0.0,
+	val passThroughVelocityFactor: Double = 0.0,
+	val stabilizeRetargetDirection: Boolean = false
+) {
+	init {
+		require(durationScale > 0.0)
+		require(startVelocityFactor >= 0.0)
+		require(passThroughVelocityFactor >= 0.0)
+	}
+}
+
 internal data class AimMoveContext(
-	val rowDelta: Int,
-	val columnDelta: Int,
 	val chebyshevDistance: Int,
-	val euclideanDistance: Double,
-	val diagonal: Boolean,
 	val continuingDirection: Boolean,
 	val reversingDirection: Boolean,
-	val passesThroughTarget: Boolean,
-	val nextChebyshevDistance: Int
+	val passesThroughTarget: Boolean
 )
 
 internal data class MotionAxis(
@@ -61,7 +66,6 @@ internal data class MotionAxis(
 
 internal data class AimPlan(
 	val mode: AimMode,
-	val moveContext: AimMoveContext?,
 	val start: Rotation,
 	val final: Rotation,
 	val angularDistance: Double,
@@ -103,7 +107,8 @@ internal class SimonSaysAimController {
 		mode: AimMode,
 		moveContext: AimMoveContext? = null,
 		nowMs: Long = monotonicNowMs(),
-		timing: AimTimingProfile = AimTimingProfile()
+		timing: AimTimingProfile = AimTimingProfile(),
+		motion: AimMotionProfile = AimMotionProfile()
 	) {
 		start(
 			start = Rotation(player.yRot, player.xRot.coerceIn(MIN_PITCH, MAX_PITCH)),
@@ -112,7 +117,8 @@ internal class SimonSaysAimController {
 			mode = mode,
 			moveContext = moveContext,
 			nowMs = nowMs,
-			timing = timing
+			timing = timing,
+			motion = motion
 		)
 	}
 
@@ -124,14 +130,13 @@ internal class SimonSaysAimController {
 		moveContext: AimMoveContext? = null,
 		nowMs: Long = monotonicNowMs(),
 		seed: Long = ThreadLocalRandom.current().nextLong(),
-		timing: AimTimingProfile = AimTimingProfile()
+		timing: AimTimingProfile = AimTimingProfile(),
+		motion: AimMotionProfile = AimMotionProfile()
 	) {
 		val previousPlan = plan
 		val previousMotion = previousPlan
 			?.takeIf { carriesMotion(it, mode, nowMs) }
 			?.let { sampleMotion(it, nowMs - it.startedAtMs) }
-		val initialVelocity = clampMagnitude(previousMotion?.velocity ?: ZERO_ROTATION, MAX_ANGULAR_SPEED)
-		val initialAcceleration = clampMagnitude(previousMotion?.acceleration ?: ZERO_ROTATION, MAX_ANGULAR_ACCELERATION)
 		val final = Rotation(
 			start.yaw + Mth.wrapDegrees(target.yaw - start.yaw),
 			target.pitch.coerceIn(MIN_PITCH, MAX_PITCH)
@@ -141,13 +146,52 @@ internal class SimonSaysAimController {
 		val angularDistance = sqrt(yawDelta * yawDelta + pitchDelta * pitchDelta)
 		val random = Random(seed)
 		val safeSettings = settings.coerced(timing)
-		val durationMs = planDurationMs(angularDistance, mode, safeSettings, moveContext, random, timing)
+		val durationMs = planDurationMs(angularDistance, mode, safeSettings, moveContext, random, timing, motion)
+		val durationSeconds = max(0.001, durationMs / 1000.0)
+		val nominalVelocity = angularDistance / durationSeconds
+		val initialVelocity = when {
+			previousMotion == null ->
+				directionalMotion(
+					yawDelta,
+					pitchDelta,
+					angularDistance,
+					minOf(MAX_ANGULAR_SPEED, nominalVelocity * motion.startVelocityFactor)
+				)
+			motion.stabilizeRetargetDirection -> projectTowardTarget(
+				previousMotion.velocity,
+				yawDelta,
+				pitchDelta,
+				angularDistance,
+				minOf(MAX_ANGULAR_SPEED, nominalVelocity * MAX_CARRIED_VELOCITY_FACTOR)
+			)
+			else -> clampMagnitude(previousMotion.velocity, MAX_ANGULAR_SPEED)
+		}
+		val initialAcceleration = when {
+			previousMotion == null -> ZERO_ROTATION
+			motion.stabilizeRetargetDirection -> projectAlongTarget(
+				previousMotion.acceleration,
+				yawDelta,
+				pitchDelta,
+				angularDistance,
+				MAX_ANGULAR_ACCELERATION
+			)
+			else -> clampMagnitude(previousMotion.acceleration, MAX_ANGULAR_ACCELERATION)
+		}
+		val finalVelocity = if (moveContext?.passesThroughTarget == true && !moveContext.reversingDirection) {
+			directionalMotion(
+				yawDelta,
+				pitchDelta,
+				angularDistance,
+				minOf(MAX_ANGULAR_SPEED, nominalVelocity * motion.passThroughVelocityFactor)
+			)
+		} else {
+			ZERO_ROTATION
+		}
 		val curveDirection = perpendicularDirection(yawDelta, pitchDelta, angularDistance, random)
 		val curveAmount = curveAmount(angularDistance, mode, safeSettings, random)
 
 		plan = AimPlan(
 			mode = mode,
-			moveContext = moveContext,
 			start = start,
 			final = final,
 			angularDistance = angularDistance,
@@ -159,7 +203,7 @@ internal class SimonSaysAimController {
 				start.yaw.toDouble(),
 				final.yaw.toDouble(),
 				initialVelocity.yaw.toDouble(),
-				0.0,
+				finalVelocity.yaw.toDouble(),
 				initialAcceleration.yaw.toDouble(),
 				0.0,
 				durationMs
@@ -168,7 +212,7 @@ internal class SimonSaysAimController {
 				start.pitch.toDouble(),
 				final.pitch.toDouble(),
 				initialVelocity.pitch.toDouble(),
-				0.0,
+				finalVelocity.pitch.toDouble(),
 				initialAcceleration.pitch.toDouble(),
 				0.0,
 				durationMs
@@ -184,9 +228,7 @@ internal class SimonSaysAimController {
 		val elapsedMs = max(0L, nowMs - activePlan.startedAtMs)
 		val motion = sampleMotion(activePlan, elapsedMs)
 		val finished = elapsedMs >= activePlan.durationMs
-		val clickableMode = activePlan.mode != AimMode.PRACTICE &&
-			activePlan.mode != AimMode.PRACTICE_RETURN &&
-			activePlan.mode != AimMode.PRE_AIM
+		val clickableMode = activePlan.mode != AimMode.PRE_AIM
 		val readyToClick = clickableMode &&
 			elapsedMs >= activePlan.clickReadyAtMs &&
 			angularError(motion.rotation, activePlan.final) <= clickReadyTolerance(activePlan)
@@ -284,7 +326,8 @@ internal class SimonSaysAimController {
 		settings: AimSettings,
 		moveContext: AimMoveContext?,
 		random: Random,
-		timing: AimTimingProfile
+		timing: AimTimingProfile,
+		motion: AimMotionProfile
 	): Long {
 		val baseMs = BASE_DURATION_MS + distance * MS_PER_DEGREE
 		val modeScale = when (mode) {
@@ -293,8 +336,6 @@ internal class SimonSaysAimController {
 			AimMode.CHAINED_RETARGET -> 0.86
 			AimMode.PRE_AIM -> 1.06
 			AimMode.WAIT_CORRECTION -> 0.80
-			AimMode.PRACTICE -> 0.92
-			AimMode.PRACTICE_RETURN -> 0.98
 		}
 		val contextScale = when {
 			moveContext == null -> 1.0
@@ -308,7 +349,7 @@ internal class SimonSaysAimController {
 		}
 		val jitterStrength = 0.45 + settings.randomness * 0.55
 		val jitter = 1.0 + random.between(-0.025, 0.03) * jitterStrength
-		val requested = baseMs * modeScale * contextScale * jitter / settings.speed
+		val requested = baseMs * modeScale * contextScale * jitter * motion.durationScale / settings.speed
 		val velocityFloor = distance * QUINTIC_PEAK_VELOCITY_FACTOR / MAX_ANGULAR_SPEED * 1000.0
 		val accelerationFloor = sqrt(distance * QUINTIC_PEAK_ACCELERATION_FACTOR / MAX_ANGULAR_ACCELERATION) * 1000.0
 		val minimum = max(modeMinimumMs(mode), max(velocityFloor, accelerationFloor))
@@ -325,8 +366,6 @@ internal class SimonSaysAimController {
 			AimMode.CHAINED_RETARGET -> 76.0
 			AimMode.PRE_AIM -> 100.0
 			AimMode.WAIT_CORRECTION -> 65.0
-			AimMode.PRACTICE -> 82.0
-			AimMode.PRACTICE_RETURN -> 90.0
 		}
 
 	private fun modeMaximumMs(mode: AimMode): Long =
@@ -336,8 +375,6 @@ internal class SimonSaysAimController {
 			AimMode.CHAINED_RETARGET -> 260L
 			AimMode.PRE_AIM -> 280L
 			AimMode.WAIT_CORRECTION -> 220L
-			AimMode.PRACTICE,
-			AimMode.PRACTICE_RETURN -> 260L
 		}
 
 	private fun curveAmount(distance: Double, mode: AimMode, settings: AimSettings, random: Random): Double {
@@ -346,8 +383,6 @@ internal class SimonSaysAimController {
 		}
 		val modeScale = when (mode) {
 			AimMode.PRE_AIM -> 0.45
-			AimMode.PRACTICE -> 1.08
-			AimMode.PRACTICE_RETURN -> 0.62
 			else -> 1.0
 		}
 		val randomnessScale = 0.55 + settings.randomness * 0.45
@@ -401,8 +436,7 @@ internal class SimonSaysAimController {
 		copy(
 			speed = speed.coerceIn(timing.minimumSpeed, timing.maximumSpeed),
 			randomness = randomness.coerceIn(0.0, 1.0),
-			overshootStrength = overshootStrength.coerceIn(0.0, 1.3),
-			microCorrection = microCorrection.coerceIn(0.0, 1.0)
+			overshootStrength = overshootStrength.coerceIn(0.0, 1.3)
 		)
 
 	private fun clampMagnitude(rotation: Rotation, maximum: Double): Rotation {
@@ -412,6 +446,52 @@ internal class SimonSaysAimController {
 		}
 		val scale = maximum / length
 		return Rotation((rotation.yaw * scale).toFloat(), (rotation.pitch * scale).toFloat())
+	}
+
+	private fun directionalMotion(
+		yawDelta: Double,
+		pitchDelta: Double,
+		distance: Double,
+		magnitude: Double
+	): Rotation {
+		if (distance <= 0.0001 || magnitude <= 0.0) {
+			return ZERO_ROTATION
+		}
+		return Rotation(
+			(yawDelta / distance * magnitude).toFloat(),
+			(pitchDelta / distance * magnitude).toFloat()
+		)
+	}
+
+	private fun projectTowardTarget(
+		motion: Rotation,
+		yawDelta: Double,
+		pitchDelta: Double,
+		distance: Double,
+		maximum: Double
+	): Rotation {
+		if (distance <= 0.0001) {
+			return ZERO_ROTATION
+		}
+		val projected = (motion.yaw * yawDelta + motion.pitch * pitchDelta) / distance
+		return directionalMotion(yawDelta, pitchDelta, distance, projected.coerceIn(0.0, maximum))
+	}
+
+	private fun projectAlongTarget(
+		motion: Rotation,
+		yawDelta: Double,
+		pitchDelta: Double,
+		distance: Double,
+		maximum: Double
+	): Rotation {
+		if (distance <= 0.0001) {
+			return ZERO_ROTATION
+		}
+		val projected = ((motion.yaw * yawDelta + motion.pitch * pitchDelta) / distance)
+			.coerceIn(-maximum, maximum)
+		return directionalMotion(yawDelta, pitchDelta, distance, kotlin.math.abs(projected)).let {
+			if (projected >= 0.0) it else Rotation(-it.yaw, -it.pitch)
+		}
 	}
 
 	private fun Random.between(minimum: Double, maximum: Double): Double =
@@ -438,6 +518,7 @@ internal class SimonSaysAimController {
 		private const val MS_PER_DEGREE = 3.15
 		private const val MAX_ANGULAR_SPEED = 540.0
 		private const val MAX_ANGULAR_ACCELERATION = 14_000.0
+		private const val MAX_CARRIED_VELOCITY_FACTOR = 1.45
 		private const val QUINTIC_PEAK_VELOCITY_FACTOR = 1.875
 		private const val QUINTIC_PEAK_ACCELERATION_FACTOR = 5.8
 		private const val CLICK_READY_PROGRESS = 0.72
