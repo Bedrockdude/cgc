@@ -19,9 +19,11 @@ import cgc.cgc.module.impl.dungeon.TerminalSolver
 import cgc.cgc.module.impl.dungeon.TriggerBot
 import cgc.cgc.module.impl.fixies.CapitalLetterCommands
 import cgc.cgc.module.impl.general.InventoryButtons
+import cgc.cgc.module.impl.general.PartyNamesTweaks
 import cgc.cgc.module.impl.movement.Ether
 import cgc.cgc.module.impl.movement.VelocityBuffer
 import cgc.cgc.module.impl.other.DNYapper
+import cgc.cgc.module.impl.other.ShitterList
 import cgc.cgc.module.impl.player.BonzoHelper
 import cgc.cgc.module.impl.player.HotbarSwitcher
 import cgc.cgc.module.impl.player.MaskHelper
@@ -34,6 +36,7 @@ import cgc.cgc.module.impl.utils.TerminalTimes
 import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.runtime.CgcRuntime
 import cgc.cgc.location.Location
+import cgc.cgc.navigation.NavigationDebugRenderer
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
@@ -75,10 +78,12 @@ object CgcModules {
 			OpSec(),
 			CapitalLetterCommands(),
 			InventoryButtons(),
+			PartyNamesTweaks(),
 			BonzoHelper(),
 			HotbarSwitcher(),
 			MaskHelper(),
-			DNYapper()
+			DNYapper(),
+			ShitterList()
 		)
 	}
 
@@ -147,6 +152,7 @@ object CgcModules {
 	}
 
 	fun worldRenderStart() {
+		NavigationDebugRenderer.enqueue()
 		manager.all()
 			.asSequence()
 			.filter { it.enabled }

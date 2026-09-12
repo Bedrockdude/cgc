@@ -3,12 +3,22 @@ Auto door
 Auto p5
 Auto complain
 /pv
-Auto puzzles
 
 
 
 
 Hotbar switcher (Issues (Don't get banned))
+
+
+Auto leap stuff
+- After you finish i4
+- Tank CP (after first lightning)
+- Heal CP (after crush)
+- Blood rush (Key pickup)
+
+
+
+
 
 
 

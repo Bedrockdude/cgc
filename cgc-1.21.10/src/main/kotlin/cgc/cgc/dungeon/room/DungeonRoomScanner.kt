@@ -22,15 +22,19 @@ object DungeonRoomScanner {
 	private val gson = Gson()
 	private val roomsByCore by lazy { loadRooms().flatMap { room -> room.cores.orEmpty().map { it to room } }.toMap() }
 	private val roomsByCenter = hashMapOf<Pair<Int, Int>, ScannedDungeonRoom>()
+	private val doorsByCenter = hashMapOf<Pair<Int, Int>, RawDoor>()
 	private var lastScanAt = 0L
 	private var currentRoom: ScannedDungeonRoom? = null
-	private var hasFullScan = false
+	private var layoutRevision = 0L
+	private var currentLayout = ScannedDungeonLayout.EMPTY
 
 	fun reset() {
 		roomsByCenter.clear()
+		doorsByCenter.clear()
 		lastScanAt = 0L
 		currentRoom = null
-		hasFullScan = false
+		layoutRevision = 0L
+		currentLayout = ScannedDungeonLayout.EMPTY
 	}
 
 	fun tick(client: Minecraft) {
@@ -39,7 +43,7 @@ object DungeonRoomScanner {
 			return
 		}
 
-		if (!hasFullScan && System.currentTimeMillis() - lastScanAt >= SCAN_INTERVAL_MS) {
+		if (System.currentTimeMillis() - lastScanAt >= SCAN_INTERVAL_MS) {
 			scanLoadedRooms(client)
 		}
 		currentRoom = scanCurrentRoom(client) ?: currentRoomForPlayer(client)
@@ -56,10 +60,23 @@ object DungeonRoomScanner {
 		return currentRoom ?: currentRoomForPlayer(client)
 	}
 
+	fun layout(): ScannedDungeonLayout = currentLayout
+
+	fun allRooms(): List<ScannedDungeonRoom> = currentLayout.rooms
+
+	fun roomAt(x: Int, z: Int): ScannedDungeonRoom? = roomCenter(x, z)?.let(roomsByCenter::get)
+
+	fun adjacentRooms(room: ScannedDungeonRoom): List<ScannedDungeonRoom> = currentLayout.adjacentRooms(room)
+
+	fun doorsFor(room: ScannedDungeonRoom): List<ScannedDungeonDoor> = currentLayout.doorsFor(room)
+
+	fun bloodRoute(): List<ScannedDungeonRoom> = currentLayout.bloodRoute
+
+	fun bloodRouteDoors(): List<ScannedDungeonDoor> = currentLayout.bloodRouteDoors
+
 	private fun scanLoadedRooms(client: Minecraft) {
 		val level = client.level ?: return
 		val tiles = arrayListOf<RoomTile>()
-		var allLoaded = true
 
 		for (arrayX in 0..10 step 2) {
 			for (arrayZ in 0..10 step 2) {
@@ -67,7 +84,6 @@ object DungeonRoomScanner {
 				val z = START_Z + arrayZ * HALF_ROOM_SIZE
 				val loadedPos = BlockPos(x, SCAN_Y, z)
 				if (!level.isLoaded(loadedPos)) {
-					allLoaded = false
 					continue
 				}
 
@@ -88,8 +104,83 @@ object DungeonRoomScanner {
 				roomsByCenter[center] = chooseBetterRoom(publicRoom, previous)
 			}
 		}
-		hasFullScan = allLoaded && scannedCenters.all { roomsByCenter[it]?.canTransform == true }
+		scanLoadedDoors(client)
+		rebuildLayout()
 		lastScanAt = System.currentTimeMillis()
+	}
+
+	private fun scanLoadedDoors(client: Minecraft) {
+		val level = client.level ?: return
+		for (arrayX in 0..10) for (arrayZ in 0..10) {
+			if ((arrayX and 1) == (arrayZ and 1)) continue
+			val x = START_X + arrayX * HALF_ROOM_SIZE
+			val z = START_Z + arrayZ * HALF_ROOM_SIZE
+			val loadedPos = BlockPos(x, SCAN_Y, z)
+			if (!level.isLoaded(loadedPos)) continue
+			val roof = roofHeight(x, z, level.getChunk(loadedPos))
+			val marker = level.getBlockState(BlockPos(x, DOOR_MARKER_Y, z)).block
+			val type = when (marker) {
+				Blocks.RED_TERRACOTTA -> DungeonDoorType.BLOOD
+				Blocks.INFESTED_CHISELED_STONE_BRICKS -> DungeonDoorType.ENTRANCE
+				Blocks.COAL_BLOCK -> DungeonDoorType.WITHER
+				else -> DungeonDoorType.NORMAL
+			}
+			val physicalDoor = roof in DOOR_ROOF_HEIGHTS || type != DungeonDoorType.NORMAL
+			if (physicalDoor) doorsByCenter[x to z] = RawDoor(x, z, type)
+			else doorsByCenter.remove(x to z)
+		}
+	}
+
+	private fun rebuildLayout() {
+		val rooms = roomsByCenter.values.distinctBy { it.signature }
+		val doors = doorsByCenter.values.mapNotNull { raw ->
+			val horizontal = ((raw.x - START_X) / HALF_ROOM_SIZE) and 1 == 1
+			val first = if (horizontal) roomsByCenter[(raw.x - HALF_ROOM_SIZE) to raw.z]
+			else roomsByCenter[raw.x to (raw.z - HALF_ROOM_SIZE)]
+			val second = if (horizontal) roomsByCenter[(raw.x + HALF_ROOM_SIZE) to raw.z]
+			else roomsByCenter[raw.x to (raw.z + HALF_ROOM_SIZE)]
+			if (first == null || second == null || first.signature == second.signature) null
+			else ScannedDungeonDoor(BlockPos(raw.x, DOOR_MARKER_Y, raw.z), raw.type, first, second)
+		}.distinctBy { it.position }
+		val route = findBloodRoute(rooms, doors)
+		val routeDoors = route.zipWithNext().mapNotNull { (a, b) ->
+			doors.firstOrNull {
+				(it.firstRoom.signature == a.signature && it.secondRoom.signature == b.signature) ||
+					(it.firstRoom.signature == b.signature && it.secondRoom.signature == a.signature)
+			}
+		}
+		layoutRevision++
+		currentLayout = ScannedDungeonLayout(layoutRevision, rooms, doors, route, routeDoors)
+	}
+
+	private fun findBloodRoute(
+		rooms: List<ScannedDungeonRoom>,
+		doors: List<ScannedDungeonDoor>
+	): List<ScannedDungeonRoom> {
+		val start = rooms.firstOrNull { it.type.equals("ENTRANCE", true) } ?: return emptyList()
+		val target = rooms.firstOrNull { it.type.equals("BLOOD", true) } ?: return emptyList()
+		val previous = hashMapOf<String, ScannedDungeonRoom?>()
+		val queue = ArrayDeque<ScannedDungeonRoom>()
+		previous[start.signature] = null
+		queue.add(start)
+		while (queue.isNotEmpty()) {
+			val room = queue.removeFirst()
+			if (room.signature == target.signature) break
+			for (next in doors.mapNotNull { it.other(room) }) {
+				if (next.signature !in previous) {
+					previous[next.signature] = room
+					queue.add(next)
+				}
+			}
+		}
+		if (target.signature !in previous) return emptyList()
+		val result = arrayListOf<ScannedDungeonRoom>()
+		var cursor: ScannedDungeonRoom? = target
+		while (cursor != null) {
+			result.add(cursor)
+			cursor = previous[cursor.signature]
+		}
+		return result.asReversed()
 	}
 
 	private fun scanCurrentRoom(client: Minecraft): ScannedDungeonRoom? {
@@ -369,6 +460,8 @@ object DungeonRoomScanner {
 		val routeGroupKey: String = data?.displayName ?: "core_$core"
 	}
 
+	private data class RawDoor(val x: Int, val z: Int, val type: DungeonDoorType)
+
 	private data class RotationResult(
 		val main: RoomTile?,
 		val rotation: DungeonRoomRotation
@@ -412,6 +505,8 @@ object DungeonRoomScanner {
 	private const val MAX_CORE_SCAN_Y = 140
 	private const val AIR_BREAK_Y = 69
 	private const val SCAN_INTERVAL_MS = 250L
+	private const val DOOR_MARKER_Y = 69
+	private val DOOR_ROOF_HEIGHTS = setOf(73, 74, 81, 82)
 
 	private val IGNORED_CORE_BLOCKS: Set<Block> = setOf(Blocks.OAK_PLANKS, Blocks.TRAPPED_CHEST, Blocks.CHEST)
 	private val CORNER_OFFSETS = listOf(-15 to -15, 15 to -15, 15 to 15, -15 to 15)

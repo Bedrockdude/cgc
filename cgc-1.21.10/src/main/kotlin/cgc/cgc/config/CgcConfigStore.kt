@@ -59,12 +59,18 @@ object CgcConfigStore {
 			for (groupElement in groups) {
 				val groupObj = groupElement.asJsonObject
 				val groupName = groupObj.get("name")?.asString ?: continue
-				val groupSetting = module.getSettingFromName(groupName) as? GroupSetting<*> ?: continue
+				val groupSetting = module.getSettingFromName(groupName) as? GroupSetting<*>
 
-				groupSetting.register()
-				groupObj.get("toggled")?.asBoolean?.let { groupSetting.value.setEnabled(it) }
-				groupSetting.value.onModuleToggled(module.enabled)
-				loadSettings(groupObj.getAsJsonArray("settings"), groupSetting.value.settings)
+				if (groupSetting != null) {
+					groupSetting.register()
+					groupObj.get("toggled")?.asBoolean?.let { groupSetting.value.setEnabled(it) }
+					groupSetting.value.onModuleToggled(module.enabled)
+				}
+				loadSettings(
+					groupObj.getAsJsonArray("settings"),
+					groupSetting?.value?.settings.orEmpty(),
+					module.flatSettings()
+				)
 			}
 
 			module.onLoaded()
@@ -88,15 +94,20 @@ object CgcConfigStore {
 		write(root.resolve("modules").resolve("${module.id}.json"), obj)
 	}
 
-	private fun loadSettings(json: JsonArray?, settings: List<Setting<*>>) {
+	private fun loadSettings(
+		json: JsonArray?,
+		settings: List<Setting<*>>,
+		fallbackSettings: List<Setting<*>> = emptyList()
+	) {
 		if (json == null) return
 		val byName = settings.associateBy { it.name.lowercase(Locale.ROOT) }
+		val fallbackByName = fallbackSettings.groupBy { it.name.lowercase(Locale.ROOT) }
 
 		for (element in json) {
 			runCatching {
 				val obj = element.asJsonObject
 				val name = obj.get("name")?.asString?.lowercase(Locale.ROOT) ?: return@runCatching
-				val setting = byName[name] ?: return@runCatching
+				val setting = byName[name] ?: fallbackByName[name]?.singleOrNull() ?: return@runCatching
 				setting.loadFromJson(obj)
 				setting.register()
 			}

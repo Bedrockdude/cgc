@@ -11,7 +11,8 @@ abstract class CgcModule(
 	val category: ModuleCategory,
 	val description: String,
 	defaultEnabled: Boolean = false,
-	val toggleable: Boolean = true
+	val toggleable: Boolean = true,
+	val visibleInGui: Boolean = true
 ) : ModuleBase(defaultEnabled) {
 	private val group = DefaultGroupSetting("General", this)
 	private val registeredGroups = arrayListOf<GroupSetting<out SubModule<*>>>()

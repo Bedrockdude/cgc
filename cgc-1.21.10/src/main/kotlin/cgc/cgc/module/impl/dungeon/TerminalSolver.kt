@@ -23,7 +23,8 @@ class TerminalSolver : CgcModule(
 	displayName = "Terminal solver",
 	category = ModuleCategory.DUNGEONS,
 	description = "Provides terminal-solver options used by CGC terminal modules.",
-	defaultEnabled = false
+	defaultEnabled = false,
+	visibleInGui = false
 ), PacketSendModule, WorldLoadModule {
 	private val terminalsSetting = MultiBoolSetting(
 		"Terminals",

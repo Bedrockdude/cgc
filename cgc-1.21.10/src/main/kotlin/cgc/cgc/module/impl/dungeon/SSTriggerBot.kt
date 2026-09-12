@@ -50,7 +50,8 @@ class SSTriggerBot : CgcModule(
 	displayName = "SS Trigger-bot",
 	category = ModuleCategory.DUNGEONS,
 	description = "Clicks spectator safe Simon Says buttons when you hover the correct one.",
-	defaultEnabled = false
+	defaultEnabled = false,
+	visibleInGui = false
 ), ClientTickModule, WorldRenderExtractModule, HudRenderModule, WorldLoadModule, ChatMessageModule, BlockChangeModule {
 	private val resetKey = KeybindSetting("Reset Key", Keybind(action = this::SSR))
 	private val autoStart = BooleanSetting("Auto start", true)

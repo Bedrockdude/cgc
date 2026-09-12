@@ -15,6 +15,7 @@ import cgc.cgc.module.setting.KeybindSetting
 import cgc.cgc.module.setting.ModeSetting
 import cgc.cgc.module.setting.MultiBoolSetting
 import cgc.cgc.module.setting.NumberSetting
+import cgc.cgc.module.setting.PlayerNameAliasListSetting
 import cgc.cgc.module.setting.SaveSetting
 import cgc.cgc.module.setting.Setting
 import cgc.cgc.module.setting.SoundSetting
@@ -112,6 +113,7 @@ private class RsmStylePanel {
 	private var leftScroll = 0.0
 	private var writingSearch = false
 	private var focusedString: StringSetting? = null
+	private var focusedPlayerAlias: FocusedPlayerAlias? = null
 	private var focusedSave: SaveSetting<*>? = null
 	private var waitingKeybind: KeybindSetting? = null
 	private var waitingHotbarSwapKey: WaitingHotbarSwapKey? = null
@@ -180,6 +182,7 @@ private class RsmStylePanel {
 
 		writingSearch = false
 		focusedString = null
+		focusedPlayerAlias = null
 		focusedSave = null
 		waitingHotbarSwapKey = null
 		if (button == 0) expandedSettingKey = null
@@ -240,6 +243,17 @@ private class RsmStylePanel {
 			return true
 		}
 
+		focusedPlayerAlias?.let { focused ->
+			if (!typedChar.isISOControl()) {
+				focused.setting.setField(
+					focused.entry,
+					focused.field,
+					focused.setting.fieldValue(focused.entry, focused.field) + typedChar
+				)
+			}
+			return true
+		}
+
 		focusedSave?.let { setting ->
 			if (!typedChar.isISOControl()) setting.setFileName(setting.fileName + typedChar)
 			return true
@@ -280,6 +294,12 @@ private class RsmStylePanel {
 			return handleTextKey(input, setting.value, allowBlank = setting.allowBlank) { setting.setText(it) }
 		}
 
+		focusedPlayerAlias?.let { focused ->
+			return handleTextKey(input, focused.setting.fieldValue(focused.entry, focused.field), allowBlank = true) {
+				focused.setting.setField(focused.entry, focused.field, it)
+			}
+		}
+
 		focusedSave?.let { setting ->
 			return handleTextKey(input, setting.fileName, allowBlank = true) { setting.setFileName(it) }
 		}
@@ -291,9 +311,13 @@ private class RsmStylePanel {
 		if (initialized) return
 		initialized = true
 
-		val fallbackCategory = ModuleCategory.entries.firstOrNull { CgcModules.manager.byCategory(it).isNotEmpty() } ?: ModuleCategory.MOVEMENT
+		val fallbackCategory = ModuleCategory.entries.firstOrNull {
+			CgcModules.manager.byCategory(it).any(CgcModule::visibleInGui)
+		} ?: ModuleCategory.MOVEMENT
 		for (category in ModuleCategory.entries) {
-			val modules = CgcModules.manager.byCategory(category).sortedBy { it.displayName.lowercase(Locale.ROOT) }
+			val modules = CgcModules.manager.byCategory(category)
+				.filter(CgcModule::visibleInGui)
+				.sortedBy { it.displayName.lowercase(Locale.ROOT) }
 			modulesByCategory[category] = modules
 		}
 		applySessionState(fallbackCategory)
@@ -369,6 +393,7 @@ private class RsmStylePanel {
 			if (button == 0) {
 				writingSearch = true
 				focusedString = null
+				focusedPlayerAlias = null
 				focusedSave = null
 				waitingKeybind = null
 				waitingHotbarSwapKey = null
@@ -564,7 +589,7 @@ private class RsmStylePanel {
 			val selected = selectedGroup == group
 			val tabWidth = font.width(group.name) + 12
 			val hovered = Bounds(cursorX - 5, y + 68, tabWidth, 27).contains(mouseX.toDouble(), mouseY.toDouble())
-			val enabled = group.name.equals("General", ignoreCase = true) || group.value.enabled
+			val enabled = !group.toggleable || group.name.equals("General", ignoreCase = true) || group.value.enabled
 			val hoverValue = animate(groupHover, key, if (hovered || selected) 1.0f else 0.0f)
 			val selectValue = animate(groupSelect, key, if (selected) 1.0f else 0.0f)
 
@@ -574,7 +599,10 @@ private class RsmStylePanel {
 			if (underline > 0) fill(gfx, cursorX, y + 91, cursorX + underline, y + 93, Colours.SELECTED)
 
 			hitboxes.add(Hitbox(cursorX - 5, y + 68, tabWidth, 27) { button ->
-				if (button == CgcSettings.toggleMouseButton && !group.name.equals("General", ignoreCase = true)) {
+				if (button == CgcSettings.toggleMouseButton
+					&& group.toggleable
+					&& !group.name.equals("General", ignoreCase = true)
+				) {
 					group.value.toggle()
 				} else if (group.value.settings.isNotEmpty()) {
 					selectedGroups[module.id] = group
@@ -609,7 +637,10 @@ private class RsmStylePanel {
 		val settings = group.value.getShownSettings()
 		val scrollKey = "${module.id}:${group.name}"
 		val rows = settings.filter { it !is cgc.cgc.module.setting.DragSetting }
-		if (rows.any { it is HotbarSwapListSetting }) {
+		if (group.description.isNotBlank()) {
+			gfx.text(font(), fit(font(), group.description, width), startX, y + 108, Colours.UNSELECTED_TEXT, false)
+		}
+		if (rows.any { it is HotbarSwapListSetting || it is PlayerNameAliasListSetting }) {
 			renderVariableGroupSettings(gfx, module, group, rows, scrollKey, startX, startY, width, height, mouseX, mouseY)
 			return
 		}
@@ -696,6 +727,10 @@ private class RsmStylePanel {
 		val setting = row.setting
 		if (setting is HotbarSwapListSetting) {
 			renderHotbarSwaps(gfx, row, setting, mouseX, mouseY)
+			return
+		}
+		if (setting is PlayerNameAliasListSetting) {
+			renderPlayerNameAliases(gfx, row, setting)
 			return
 		}
 
@@ -1013,6 +1048,67 @@ private class RsmStylePanel {
 		dropdown?.let { renderHotbarSwapDropdown(gfx, it, mouseX, mouseY) }
 	}
 
+	private fun renderPlayerNameAliases(gfx: GuiGraphicsExtractor, row: SettingRow, setting: PlayerNameAliasListSetting) {
+		gfx.text(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
+		if (setting.value.isEmpty()) {
+			gfx.text(font(), "No names added", row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
+			return
+		}
+
+		var y = row.y + 18
+		val boxWidth = min(row.width, PLAYER_ALIAS_BOX_WIDTH)
+		for (entry in setting.value) {
+			fill(gfx, row.x, y, row.x + boxWidth, y + PLAYER_ALIAS_BOX_HEIGHT, Colours.PANEL)
+			drawRectOutline(gfx, row.x, y, boxWidth, PLAYER_ALIAS_BOX_HEIGHT, Colours.GROUP_OUTLINE)
+
+			val aliasX = row.x + 8
+			val usernameX = aliasX + 160
+			val fieldY = y + 15
+			gfx.text(font(), "Short name", aliasX, y + 5, Colours.UNSELECTED_TEXT, false)
+			gfx.text(font(), "Username", usernameX, y + 5, Colours.UNSELECTED_TEXT, false)
+			renderPlayerAliasField(gfx, setting, entry, PlayerNameAliasListSetting.Field.ALIAS, aliasX, fieldY, 150)
+			renderPlayerAliasField(gfx, setting, entry, PlayerNameAliasListSetting.Field.USERNAME, usernameX, fieldY, 190)
+
+			val removeX = row.x + boxWidth - 25
+			drawInputBox(gfx, removeX, fieldY, 18, 19, false)
+			gfx.centeredText(font(), "X", removeX + 9, fieldY + 6, Colours.TEXT)
+			hitboxes.add(Hitbox(removeX, fieldY, 18, 19) { button ->
+				if (button == 0) {
+					setting.removeAlias(entry)
+					if (focusedPlayerAlias?.entry?.id == entry.id) focusedPlayerAlias = null
+				}
+			})
+			y += PLAYER_ALIAS_BOX_HEIGHT + 6
+		}
+	}
+
+	private fun renderPlayerAliasField(
+		gfx: GuiGraphicsExtractor,
+		setting: PlayerNameAliasListSetting,
+		entry: PlayerNameAliasListSetting.NameAlias,
+		field: PlayerNameAliasListSetting.Field,
+		x: Int,
+		y: Int,
+		width: Int
+	) {
+		val focused = focusedPlayerAlias?.let { it.entry.id == entry.id && it.field == field } == true
+		drawInputBox(gfx, x, y, width, 19, focused)
+		val value = setting.fieldValue(entry, field)
+		val placeholder = if (field == PlayerNameAliasListSetting.Field.ALIAS) "e.g. Bers" else "e.g. BersPrio"
+		val shown = if (value.isBlank() && !focused) placeholder else value + if (focused) "|" else ""
+		gfx.text(font(), fit(font(), shown, width - 10), x + 5, y + 6, if (value.isBlank() && !focused) Colours.UNSELECTED_TEXT else Colours.TEXT, false)
+		hitboxes.add(Hitbox(x, y, width, 19) { button ->
+			if (button == 0) {
+				focusedPlayerAlias = FocusedPlayerAlias(setting, entry, field)
+				focusedString = null
+				focusedSave = null
+				waitingKeybind = null
+				waitingHotbarSwapKey = null
+				writingSearch = false
+			}
+		})
+	}
+
 	private fun fillMissingHotbarSwapItems(swap: HotbarSwapListSetting.Swap) {
 		val inventory = Minecraft.getInstance().player?.inventory ?: return
 		for (pair in swap.pairs) {
@@ -1211,6 +1307,7 @@ private class RsmStylePanel {
 			modulesByCategory
 		} else {
 			CgcModules.manager.all()
+				.filter(CgcModule::visibleInGui)
 				.mapNotNull { module ->
 					val score = scoreModule(search, module)
 					if (score > 200) module to score else null
@@ -1267,6 +1364,11 @@ private class RsmStylePanel {
 			} else {
 				SETTING_STEP + setting.value.size * (HOTBAR_SWAP_BOX_HEIGHT + 6)
 			}
+			is PlayerNameAliasListSetting -> if (setting.value.isEmpty()) {
+				SETTING_STEP
+			} else {
+				SETTING_STEP + setting.value.size * (PLAYER_ALIAS_BOX_HEIGHT + 6)
+			}
 			else -> SETTING_STEP
 		}
 
@@ -1282,6 +1384,7 @@ private class RsmStylePanel {
 			GLFW.GLFW_KEY_ENTER -> {
 				writingSearch = false
 				focusedString = null
+				focusedPlayerAlias = null
 				focusedSave = null
 				true
 			}
@@ -1422,6 +1525,12 @@ private class RsmStylePanel {
 		val swap: HotbarSwapListSetting.Swap
 	)
 
+	private data class FocusedPlayerAlias(
+		val setting: PlayerNameAliasListSetting,
+		val entry: PlayerNameAliasListSetting.NameAlias,
+		val field: PlayerNameAliasListSetting.Field
+	)
+
 	private data class HotbarSwapDropdown(
 		val setting: HotbarSwapListSetting,
 		val swap: HotbarSwapListSetting.Swap,
@@ -1455,6 +1564,8 @@ private class RsmStylePanel {
 		private const val CONTROL_X = 114
 		private const val HOTBAR_SWAP_BOX_WIDTH = 448
 		private const val HOTBAR_SWAP_BOX_HEIGHT = 55
+		private const val PLAYER_ALIAS_BOX_WIDTH = 448
+		private const val PLAYER_ALIAS_BOX_HEIGHT = 40
 		private const val MODE_OPTION_HEIGHT = 18
 		private const val HOTBAR_TRIGGER_OPTION_HEIGHT = 18
 	}

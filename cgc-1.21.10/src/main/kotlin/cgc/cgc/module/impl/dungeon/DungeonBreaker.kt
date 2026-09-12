@@ -26,7 +26,8 @@ class DungeonBreaker : CgcModule(
 	displayName = "ZPDB",
 	category = ModuleCategory.DUNGEONS,
 	description = "Adjusts Dungeonbreaker mining speed for valid dungeon blocks.",
-	defaultEnabled = false
+	defaultEnabled = false,
+	visibleInGui = false
 ) {
 	init {
 		instance = this

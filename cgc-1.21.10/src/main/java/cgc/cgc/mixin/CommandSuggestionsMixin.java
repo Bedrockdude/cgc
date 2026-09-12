@@ -2,6 +2,7 @@ package cgc.cgc.mixin;
 
 import cgc.cgc.client.CgcCommandRegistry;
 import cgc.cgc.config.CgcSettings;
+import cgc.cgc.module.impl.general.PartyNamesTweaks;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.mojang.brigadier.CommandDispatcher;
@@ -143,7 +144,8 @@ public class CommandSuggestionsMixin {
 
 			int minCursor = this.onlyShowIfCursorPastError ? reader.getCursor() : 1;
 			if (cursor >= minCursor && (this.suggestions == null || !this.keepSuggestions)) {
-				this.pendingSuggestions = commandDispatcher.getCompletionSuggestions(this.currentParse, cursor);
+				this.pendingSuggestions = commandDispatcher.getCompletionSuggestions(this.currentParse, cursor)
+					.thenApply(result -> PartyNamesTweaks.augmentSuggestions(string, result));
 				this.pendingSuggestions.thenRun(() -> {
 					if (this.pendingSuggestions.isDone()) {
 						this.cgc$updateUsageInfo();

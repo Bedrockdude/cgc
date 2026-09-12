@@ -37,7 +37,8 @@ class AutoTerms : CgcModule(
 	displayName = "AutoTerms",
 	category = ModuleCategory.DUNGEONS,
 	description = "Automatically clicks known F7 terminal solutions.",
-	defaultEnabled = false
+	defaultEnabled = false,
+	visibleInGui = false
 ), ClientTickModule, PacketSendModule, WorldLoadModule {
 	private val skyblock = ModeSetting("Skyblock", "Auto", listOf("Auto", "Dungeon", "Skyblock", "Practice"))
 	private val terminals = MultiBoolSetting(

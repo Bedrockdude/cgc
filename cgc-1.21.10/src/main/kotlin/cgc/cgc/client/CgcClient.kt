@@ -5,6 +5,7 @@ import cgc.cgc.client.gui.CgcUiScreen
 import cgc.cgc.config.CgcConfigStore
 import cgc.cgc.module.CgcModules
 import cgc.cgc.runtime.CgcRenderer3D
+import cgc.cgc.shitterlist.ShitterListService
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
@@ -25,7 +26,11 @@ object CgcClient : ClientModInitializer {
 	override fun onInitializeClient() {
 		CgcModules.bootstrap()
 		CgcConfigStore.loadAll()
-		Runtime.getRuntime().addShutdownHook(Thread { CgcConfigStore.saveAll() })
+		ShitterListService.start()
+		Runtime.getRuntime().addShutdownHook(Thread {
+			CgcConfigStore.saveAll()
+			ShitterListService.shutdown()
+		})
 
 		ClientTickEvents.START_CLIENT_TICK.register { client ->
 			CgcModules.clientTickStart(client)

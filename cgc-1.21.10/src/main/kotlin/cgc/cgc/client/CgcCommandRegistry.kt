@@ -8,6 +8,11 @@ import cgc.cgc.module.CgcModules
 import cgc.cgc.module.impl.dungeon.AutoC
 import cgc.cgc.module.impl.dungeon.autoc.AutoCNodeType
 import cgc.cgc.module.impl.dungeon.LeapCounter
+import cgc.cgc.navigation.NavigationService
+import cgc.cgc.shitterlist.ShitterListChangeResult
+import cgc.cgc.shitterlist.ShitterListEntry
+import cgc.cgc.shitterlist.ShitterListService
+import cgc.cgc.shitterlist.compactString
 import cgc.cgc.utils.ChatUtils
 import com.mojang.brigadier.CommandDispatcher
 import com.mojang.brigadier.arguments.DoubleArgumentType
@@ -24,6 +29,7 @@ import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource
 import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
 import net.minecraft.client.multiplayer.ClientSuggestionProvider
+import net.minecraft.core.BlockPos
 import net.minecraft.commands.SharedSuggestionProvider
 import net.minecraft.network.chat.ComponentUtils
 import java.text.Normalizer
@@ -82,6 +88,8 @@ object CgcCommandRegistry {
 			dispatcher.register(
 			fabricLiteral("cgc")
 				.then(fabricAutoCCommand("ac"))
+				.then(fabricNavigationCommand())
+				.then(fabricShitterListCommand())
 				.then(fabricLiteral("ui").executes {
 					openUi()
 					1
@@ -145,6 +153,8 @@ object CgcCommandRegistry {
 		dispatcher.register(
 			literal("cgc")
 				.then(autoCCommand("ac"))
+				.then(navigationCommand())
+				.then(shitterListCommand())
 				.then(literal("ui").executes {
 					Minecraft.getInstance().setScreen(CgcUiScreen())
 					1
@@ -157,6 +167,160 @@ object CgcCommandRegistry {
 		dispatcher.register(autoCCommand("ac"))
 		registerLeapCounter("lc")
 		registerLeapCounter("leapcounter")
+	}
+
+	private fun shitterListCommand(): LiteralArgumentBuilder<ClientSuggestionProvider> =
+		literal("shitterlist")
+			.then(
+				literal("add")
+					.then(argument("player", StringArgumentType.word()).executes { ctx ->
+						changeShitterList(StringArgumentType.getString(ctx, "player"), add = true)
+					})
+					.executes { shitterListUsage() }
+			)
+			.then(
+				literal("remove")
+					.then(argument("player", StringArgumentType.word()).executes { ctx ->
+						changeShitterList(StringArgumentType.getString(ctx, "player"), add = false)
+					})
+					.executes { shitterListUsage() }
+			)
+			.then(literal("list").executes { listShitterList() })
+			.executes { shitterListUsage() }
+
+	private fun fabricShitterListCommand(): LiteralArgumentBuilder<FabricClientCommandSource> =
+		fabricLiteral("shitterlist")
+			.then(
+				fabricLiteral("add")
+					.then(fabricArgument("player", StringArgumentType.word()).executes { ctx ->
+						changeShitterList(StringArgumentType.getString(ctx, "player"), add = true)
+					})
+					.executes { shitterListUsage() }
+			)
+			.then(
+				fabricLiteral("remove")
+					.then(fabricArgument("player", StringArgumentType.word()).executes { ctx ->
+						changeShitterList(StringArgumentType.getString(ctx, "player"), add = false)
+					})
+					.executes { shitterListUsage() }
+			)
+			.then(fabricLiteral("list").executes { listShitterList() })
+			.executes { shitterListUsage() }
+
+	private fun changeShitterList(target: String, add: Boolean): Int {
+		val result = if (add) ShitterListService.add(target) else ShitterListService.remove(target)
+		result.whenComplete { change, failure ->
+			Minecraft.getInstance().execute {
+				if (failure != null || change == null) {
+					error("Could not reach the Minecraft profile service.")
+					return@execute
+				}
+				showShitterListResult(change)
+			}
+		}
+		return 1
+	}
+
+	private fun showShitterListResult(result: ShitterListChangeResult) {
+		when (result) {
+			is ShitterListChangeResult.Added -> info("Added ${formatShitterEntry(result.entry)} to the Shitter List.")
+			is ShitterListChangeResult.Removed -> info("Removed ${formatShitterEntry(result.entry)} from the Shitter List.")
+			is ShitterListChangeResult.AlreadyListed -> info("${formatShitterEntry(result.entry)} is already on the Shitter List.")
+			ShitterListChangeResult.NotListed -> error("That player is not on the Shitter List.")
+			ShitterListChangeResult.Protected -> error(ShitterListService.PROTECTED_ERROR_MESSAGE)
+			ShitterListChangeResult.InvalidTarget -> error("Enter a valid Minecraft username or UUID.")
+			ShitterListChangeResult.ProfileNotFound -> error("Could not find that Minecraft player.")
+			ShitterListChangeResult.LookupFailed -> error("Could not reach the Minecraft profile service.")
+		}
+	}
+
+	private fun listShitterList(): Int {
+		val entries = ShitterListService.entries()
+		val sync = if (ShitterListService.syncConnected()) "connected" else "offline; local changes are queued"
+		if (entries.isEmpty()) {
+			info("Shitter List is empty. Sync is $sync.")
+			return 1
+		}
+
+		info("Shitter List: ${entries.size} player(s). Sync is $sync.")
+		entries.forEach { info(formatShitterEntry(it)) }
+		return 1
+	}
+
+	private fun formatShitterEntry(entry: ShitterListEntry): String =
+		entry.name?.let { "$it (${entry.uuid.compactString()})" } ?: entry.uuid.compactString()
+
+	private fun shitterListUsage(): Int {
+		info("Usage: /cgc shitterlist <add|remove> <username|uuid>, or /cgc shitterlist list")
+		return 1
+	}
+
+	private fun navigationCommand(): LiteralArgumentBuilder<ClientSuggestionProvider> =
+		literal("ng")
+			.then(literal("cancel").executes {
+				NavigationService.cancel(reason = "command")
+				info("Navigation cancelled.")
+				1
+			})
+			.then(literal("status").executes { navigationStatus() })
+			.then(
+				argument("x", IntegerArgumentType.integer())
+					.then(argument("y", IntegerArgumentType.integer())
+						.then(argument("z", IntegerArgumentType.integer()).executes { ctx ->
+							startNavigation(
+								IntegerArgumentType.getInteger(ctx, "x"),
+								IntegerArgumentType.getInteger(ctx, "y"),
+								IntegerArgumentType.getInteger(ctx, "z")
+							)
+						}))
+			)
+			.executes {
+				info("Usage: /cgc ng <x> <y> <z> or /cgc ng cancel")
+				1
+			}
+
+	private fun fabricNavigationCommand(): LiteralArgumentBuilder<FabricClientCommandSource> =
+		fabricLiteral("ng")
+			.then(fabricLiteral("cancel").executes {
+				NavigationService.cancel(reason = "command")
+				info("Navigation cancelled.")
+				1
+			})
+			.then(fabricLiteral("status").executes { navigationStatus() })
+			.then(
+				fabricArgument("x", IntegerArgumentType.integer())
+					.then(fabricArgument("y", IntegerArgumentType.integer())
+						.then(fabricArgument("z", IntegerArgumentType.integer()).executes { ctx ->
+							startNavigation(
+								IntegerArgumentType.getInteger(ctx, "x"),
+								IntegerArgumentType.getInteger(ctx, "y"),
+								IntegerArgumentType.getInteger(ctx, "z")
+							)
+						}))
+			)
+			.executes {
+				info("Usage: /cgc ng <x> <y> <z> or /cgc ng cancel")
+				1
+			}
+
+	private fun startNavigation(x: Int, y: Int, z: Int): Int {
+		val handle = NavigationService.navigateTo(BlockPos(x, y, z))
+		if (handle.id < 0) {
+			error("Navigation requires an active world and player.")
+			return 0
+		}
+		info("Planning navigation to $x $y $z.")
+		return 1
+	}
+
+	private fun navigationStatus(): Int {
+		val state = NavigationService.status()
+		val diagnostics = state.route?.diagnostics
+		val counts = diagnostics?.let {
+			" Etherwarp=${it.etherwarpCandidates}, setup=${it.walkingCandidates}, expanded=${it.statesExpanded}, ${it.planningTimeMs}ms."
+		}.orEmpty()
+		info("Navigation ${state.status.name.lowercase(Locale.ROOT)}: ${state.detail.ifBlank { "no detail" }}.$counts")
+		return 1
 	}
 
 	private fun autoCCommand(name: String): LiteralArgumentBuilder<ClientSuggestionProvider> =

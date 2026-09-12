@@ -26,7 +26,6 @@ import net.minecraft.core.BlockPos
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket
 import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket
-import net.minecraft.util.Mth
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.decoration.ArmorStand
@@ -49,7 +48,6 @@ class Relics : CgcModule(
 	private val autoLeap = BooleanSetting("Auto Leap", true)
 	private val range = NumberSetting("Range", 1.0, 6.0, 4.5, 0.1)
 	private val clickDelay = NumberSetting("Click Delay", 0.0, 1000.0, 150.0, 25.0, " ms")
-	private val relicSlot = NumberSetting("Relic Slot", 1.0, 9.0, 9.0, 1.0)
 	private val leapDelay = NumberSetting("Leap Delay", 0.0, 2000.0, 250.0, 25.0, " ms", supplier = { autoLeap.value })
 	private val redLeap = ModeSetting("Red Leap", "None", LEAP_MODES, supplier = { autoLeap.value })
 	private val redCustom = StringSetting("Red Custom", "", maxLength = 64, supplier = { autoLeap.value && redLeap.isMode("Custom") })
@@ -72,7 +70,7 @@ class Relics : CgcModule(
 	private var pendingLeap: PendingLeap? = null
 	private var pendingLeapUse: PendingLeapUse? = null
 	private var pendingPlace: PendingPlace? = null
-	private var placedRelicAwaitingInventoryUpdate: HeldRelic? = null
+	private val placementAttempted = mutableSetOf<RelicType>()
 
 	init {
 		registerProperty(
@@ -81,7 +79,6 @@ class Relics : CgcModule(
 			autoLeap,
 			range,
 			clickDelay,
-			relicSlot,
 			leapDelay,
 			redLeap,
 			redCustom,
@@ -106,9 +103,6 @@ class Relics : CgcModule(
 		}
 
 		val heldRelic = currentRelic(client)
-		if (placedRelicAwaitingInventoryUpdate != heldRelic) {
-			placedRelicAwaitingInventoryUpdate = null
-		}
 		if (heldRelic?.type != lastHeldRelic) {
 			heldRelic?.type?.let { scheduleLeap(it) }
 			lastHeldRelic = heldRelic?.type
@@ -194,7 +188,7 @@ class Relics : CgcModule(
 		val player = client.player ?: return
 		if (!canInteractNow()
 			|| pendingPlace != null
-			|| placedRelicAwaitingInventoryUpdate == heldRelic
+			|| heldRelic.type in placementAttempted
 			|| leapMenu.isActive
 		) {
 			return
@@ -215,6 +209,10 @@ class Relics : CgcModule(
 
 	private fun runPendingPlace(client: Minecraft) {
 		val place = pendingPlace ?: return
+		if (place.type in placementAttempted) {
+			pendingPlace = null
+			return
+		}
 		if (clientTicks < place.useAtTick) {
 			return
 		}
@@ -233,11 +231,16 @@ class Relics : CgcModule(
 	private fun placeSelectedRelic(client: Minecraft, type: RelicType, slot: Int) {
 		val player = client.player ?: return
 		val gameMode = client.gameMode ?: return
+		if (type in placementAttempted || currentRelic(client) != HeldRelic(type, slot)) {
+			return
+		}
 		val hit = currentCauldronHit(client, type) ?: return
 		player.inventory.selectedSlot = slot
+		// A relic colour can only be placed once per P5. Latch before sending the
+		// interaction so a delayed inventory update can never produce a second use.
+		placementAttempted += type
 		gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit)
 		player.swing(InteractionHand.MAIN_HAND)
-		placedRelicAwaitingInventoryUpdate = HeldRelic(type, slot)
 		lastInteractionAt = System.currentTimeMillis()
 	}
 
@@ -367,27 +370,9 @@ class Relics : CgcModule(
 
 	private fun currentRelic(client: Minecraft): HeldRelic? {
 		val player = client.player ?: return null
-		val preferredSlot = hotbarIndex(relicSlot)
-		RelicType.fromName(player.inventory.getItem(preferredSlot).hoverName.string)?.let {
-			return HeldRelic(it, preferredSlot)
-		}
-
-		val selectedSlot = player.inventory.selectedSlot
-		RelicType.fromName(player.inventory.getItem(selectedSlot).hoverName.string)?.let {
-			return HeldRelic(it, selectedSlot)
-		}
-
-		for (slot in 0..8) {
-			if (slot == preferredSlot || slot == selectedSlot) {
-				continue
-			}
-
-			RelicType.fromName(player.inventory.getItem(slot).hoverName.string)?.let {
-				return HeldRelic(it, slot)
-			}
-		}
-
-		return null
+		val type = RelicType.fromName(player.inventory.getItem(RELIC_HOTBAR_SLOT).hoverName.string)
+			?: return null
+		return HeldRelic(type, RELIC_HOTBAR_SLOT)
 	}
 
 	private fun currentCauldronHit(client: Minecraft, type: RelicType): BlockHitResult? {
@@ -407,9 +392,6 @@ class Relics : CgcModule(
 		val range = range.value.toDouble()
 		return range * range
 	}
-
-	private fun hotbarIndex(setting: NumberSetting): Int =
-		Mth.clamp(setting.value.toInt(), 1, 9) - 1
 
 	private fun isOwnPickup(actor: String): Boolean {
 		val name = Minecraft.getInstance().player?.name?.string ?: return false
@@ -434,7 +416,7 @@ class Relics : CgcModule(
 		pendingLeap = null
 		pendingLeapUse = null
 		pendingPlace = null
-		placedRelicAwaitingInventoryUpdate = null
+		placementAttempted.clear()
 	}
 
 	private fun modMessage(message: String) {
@@ -475,6 +457,7 @@ class Relics : CgcModule(
 			Pattern.CASE_INSENSITIVE
 		)
 		private const val SLOT_SETTLE_TICKS = 2L
+		private const val RELIC_HOTBAR_SLOT = 8
 		private const val MENU_TIMEOUT_MS = 1500L
 		private const val PENDING_LEAP_TIMEOUT_MS = 3000L
 		private const val DUPLICATE_PICKUP_WINDOW_MS = 1500L

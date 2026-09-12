@@ -2,6 +2,7 @@ package cgc.cgc.mixin;
 
 import cgc.cgc.client.CgcCommandRegistry;
 import cgc.cgc.module.impl.fixies.CapitalLetterCommands;
+import cgc.cgc.module.impl.general.PartyNamesTweaks;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.input.KeyEvent;
@@ -31,14 +32,16 @@ public class ChatScreenMixin {
 	@Inject(method = "handleChatInput", at = @At("HEAD"), cancellable = true)
 	private void cgc$handlePrefixedCommand(String message, boolean addToRecentChat, CallbackInfo ci) {
 		String normalized = ((ChatScreen) (Object) this).normalizeChatMessage(message);
-		String fixed = CapitalLetterCommands.normalizeInput(normalized);
+		String capitalFixed = CapitalLetterCommands.normalizeInput(normalized);
+		String fixed = PartyNamesTweaks.resolveInput(capitalFixed);
+		String historyMessage = fixed.equals(capitalFixed) ? fixed : capitalFixed;
 		if (!fixed.equals(normalized)) {
 			if (CgcCommandRegistry.tryExecutePrefixed(fixed)) {
 				if (addToRecentChat) {
-					Minecraft.getInstance().gui.getChat().addRecentChat(fixed);
+					Minecraft.getInstance().gui.getChat().addRecentChat(historyMessage);
 				}
 			} else {
-				cgc$sendChatInput(fixed, addToRecentChat);
+				cgc$sendChatInput(fixed, historyMessage, addToRecentChat);
 			}
 			ci.cancel();
 			return;
@@ -66,13 +69,13 @@ public class ChatScreenMixin {
 		this.input.setCursorPosition(Math.min(cursor, fixed.length()));
 	}
 
-	private void cgc$sendChatInput(String message, boolean addToRecentChat) {
+	private void cgc$sendChatInput(String message, String historyMessage, boolean addToRecentChat) {
 		Minecraft minecraft = Minecraft.getInstance();
 		if (message.isEmpty() || minecraft.player == null) {
 			return;
 		}
 		if (addToRecentChat) {
-			minecraft.gui.getChat().addRecentChat(message);
+			minecraft.gui.getChat().addRecentChat(historyMessage);
 		}
 
 		if (message.startsWith("/")) {

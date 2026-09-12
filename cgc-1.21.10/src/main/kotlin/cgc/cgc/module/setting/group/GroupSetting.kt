@@ -7,7 +7,9 @@ import com.google.gson.JsonObject
 open class GroupSetting<T : SubModule<*>>(
 	name: String,
 	subModule: T,
-	supplier: (() -> Boolean)? = null
+	supplier: (() -> Boolean)? = null,
+	override val description: String = "",
+	val toggleable: Boolean = true
 ) : Setting<T>(name, supplier, null) {
 	override var value: T = subModule
 

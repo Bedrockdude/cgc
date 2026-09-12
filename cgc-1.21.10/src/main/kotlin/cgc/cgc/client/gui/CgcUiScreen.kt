@@ -98,6 +98,7 @@ class CgcUiScreen : Screen(Component.literal("CGC UI")) {
 
 	private fun targets(): List<DragTarget> =
 		CgcModules.manager.all()
+			.filter { it.visibleInGui }
 			.flatMap { module -> module.getDragSettings().map { DragTarget(module, it) } }
 
 	private fun drawOutline(gfx: GuiGraphicsExtractor, x: Int, y: Int, width: Int, height: Int, colour: Int) {
