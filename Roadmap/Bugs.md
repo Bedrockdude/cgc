@@ -1,1 +1,0 @@
-- I want to make it so if a record node it's another node It will stop the record mode and continue with the next node
