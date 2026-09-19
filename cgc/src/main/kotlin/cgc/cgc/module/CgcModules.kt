@@ -27,6 +27,8 @@ import cgc.cgc.module.impl.other.ShitterList
 import cgc.cgc.module.impl.player.BonzoHelper
 import cgc.cgc.module.impl.player.HotbarSwitcher
 import cgc.cgc.module.impl.player.MaskHelper
+import cgc.cgc.module.impl.player.WardrobeHelper
+import cgc.cgc.module.impl.render.BoxDoors
 import cgc.cgc.module.impl.render.CgcClickGuiModule
 import cgc.cgc.module.impl.render.EnderPearlTrajectory
 import cgc.cgc.module.impl.render.Trail
@@ -73,6 +75,7 @@ object CgcModules {
 			AutoPuzzles(),
 			SSTriggerBot(),
 			TriggerBot(),
+			BoxDoors(),
 			EnderPearlTrajectory(),
 			Trail(),
 			OpSec(),
@@ -82,6 +85,7 @@ object CgcModules {
 			BonzoHelper(),
 			HotbarSwitcher(),
 			MaskHelper(),
+			WardrobeHelper(),
 			DNYapper(),
 			ShitterList()
 		)

@@ -20,7 +20,7 @@ object AutoPuzzleItems {
 		(0..8).firstOrNull { ItemUtils.isEtherwarp(context.player.inventory.getItem(it)) }
 
 	fun firstWaterboardClickItem(context: AutoPuzzleContext): Int? =
-		firstShortbow(context)?.slot ?: (0..8).firstOrNull { isDungeonBreaker(context.player.inventory.getItem(it)) }
+		(0..8).firstOrNull { isDungeonBreaker(context.player.inventory.getItem(it)) }
 
 	fun select(context: AutoPuzzleContext, slot: Int): Boolean {
 		if (slot !in 0..8 || context.player.inventory.getItem(slot).isEmpty) return false

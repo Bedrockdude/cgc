@@ -1,5 +1,6 @@
 package cgc.cgc.module.impl.dungeon
 
+import net.minecraft.core.BlockPos
 import net.minecraft.world.phys.Vec3
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -20,6 +21,33 @@ class AutoLeapSignalsTest {
 		assertTrue(AutoLeapSignals.isOwnDeviceCompletion("Player completed a device! (1/7)", "Player"))
 		assertTrue(AutoLeapSignals.isOwnDeviceCompletion("[MVP+] Player completed a device! (4/7)", "Player"))
 		assertFalse(AutoLeapSignals.isOwnDeviceCompletion("Teammate completed a device! (1/7)", "Player"))
+	}
+
+	@Test
+	fun `i4 block completion requires all nine distinct transitions`() {
+		val tracker = I4BlockCompletionTracker()
+		val deviceBlocks = buildList {
+			for (x in 64..68 step 2) {
+				for (y in 126..130 step 2) {
+					add(BlockPos(x, y, 50))
+				}
+			}
+		}
+
+		deviceBlocks.dropLast(1).forEach {
+			assertFalse(tracker.observeTransition(it, wasEmerald = true, isBlueTerracotta = true))
+		}
+		assertFalse(tracker.observeTransition(deviceBlocks.first(), wasEmerald = true, isBlueTerracotta = true))
+		assertTrue(tracker.observeTransition(deviceBlocks.last(), wasEmerald = true, isBlueTerracotta = true))
+	}
+
+	@Test
+	fun `i4 block completion ignores unrelated transitions`() {
+		val tracker = I4BlockCompletionTracker()
+
+		assertFalse(tracker.observeTransition(BlockPos(63, 127, 35), wasEmerald = true, isBlueTerracotta = true))
+		assertFalse(tracker.observeTransition(BlockPos(64, 126, 50), wasEmerald = false, isBlueTerracotta = true))
+		assertFalse(tracker.observeTransition(BlockPos(64, 126, 50), wasEmerald = true, isBlueTerracotta = false))
 	}
 
 	@Test

@@ -93,17 +93,20 @@ object DungeonRoomScanner {
 
 		val previousRooms = roomsByCenter.toMap()
 		val scannedRooms = buildScannedRooms(client, tiles)
-		val scannedCenters = hashSetOf<Pair<Int, Int>>()
-		roomsByCenter.clear()
+		val scannedByCenter = hashMapOf<Pair<Int, Int>, ScannedDungeonRoom>()
 		for (room in scannedRooms) {
 			val publicRoom = room.toPublicRoom()
+			val resolvedRoom = room.tiles
+				.asSequence()
+				.mapNotNull { previousRooms[it.centerX to it.centerZ] }
+				.fold(publicRoom) { resolved, previous -> chooseBetterRoom(resolved, previous) }
 			for (tile in room.tiles) {
 				val center = tile.centerX to tile.centerZ
-				scannedCenters.add(center)
-				val previous = previousRooms[center]
-				roomsByCenter[center] = chooseBetterRoom(publicRoom, previous)
+				scannedByCenter[center] = resolvedRoom
 			}
 		}
+		roomsByCenter.clear()
+		roomsByCenter.putAll(mergeRetainedRooms(previousRooms, scannedByCenter))
 		scanLoadedDoors(client)
 		rebuildLayout()
 		lastScanAt = System.currentTimeMillis()
@@ -549,7 +552,7 @@ data class ScannedDungeonRoom(
 		get() = rotation != DungeonRoomRotation.UNKNOWN
 
 	val signature: String
-		get() = "$key:$mainX:$mainZ:${rotation.name}"
+		get() = "$key:$mainX:$mainZ"
 
 	fun toRelative(pos: Pos): Pos {
 		val local = Pos(pos.x - mainX, pos.y, pos.z - mainZ)

@@ -25,7 +25,7 @@ class Keybind(
 		return InputConstants.isKeyDown(window, key.value)
 	}
 
-	fun tick(window: Window) {
+	fun tick(window: Window, allowAction: Boolean = true) {
 		val key = runCatching { InputConstants.getKey(keyName) }.getOrNull() ?: return
 		if (key == InputConstants.UNKNOWN) {
 			wasPressed = false
@@ -33,7 +33,7 @@ class Keybind(
 		}
 
 		val pressed = InputConstants.isKeyDown(window, key.value)
-		if (pressed && !wasPressed) {
+		if (pressed && !wasPressed && allowAction) {
 			run()
 		}
 		wasPressed = pressed

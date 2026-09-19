@@ -1,6 +1,8 @@
 package cgc.cgc.module.impl.dungeon.autopuzzles.waterboard
 
 import java.security.MessageDigest
+import net.minecraft.core.BlockPos
+import net.minecraft.world.phys.Vec3
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -47,6 +49,28 @@ class WaterboardDataTest {
 		assertTrue(WaterboardSolver.gateSnapshotValid(initial, setOf(0, 1), emptySet(), waterStarted = true))
 		assertFalse(WaterboardSolver.gateSnapshotValid(initial, setOf(0, 1, 4), emptySet(), waterStarted = true))
 		assertFalse(WaterboardSolver.gateSnapshotValid(initial, setOf(0, 1, 2), setOf(2), waterStarted = true))
+	}
+
+	@Test
+	fun `Etherwarp fallback checks supports one block above and below the saved height`() {
+		val preferred = BlockPos(10, 60, 20)
+		val candidates = WaterboardRoutePlanner.nearbyEtherwarpSupports(preferred)
+		assertEquals(26, candidates.size)
+		assertFalse(preferred in candidates)
+		assertTrue(preferred.below() in candidates)
+		assertTrue(preferred.above() in candidates)
+		assertEquals(candidates.size, candidates.distinct().size)
+	}
+
+	@Test
+	fun `Waterboard fallback searches around saved point approach and lever while retaining reach`() {
+		val lever = BlockPos(10, 61, 10)
+		val candidates = WaterboardRoutePlanner.etherwarpSupportCandidates(
+			BlockPos(19, 60, 20), Vec3(12.4, 60.0, 11.3), lever, 4.5
+		)
+
+		assertTrue(BlockPos(10, 60, 10) in candidates)
+		assertTrue(candidates.all { Vec3(it.x + 0.5, it.y + 1.0, it.z + 0.5).distanceToSqr(lever.center) <= 4.5 * 4.5 })
 	}
 
 	private fun hash(resource: String): String {

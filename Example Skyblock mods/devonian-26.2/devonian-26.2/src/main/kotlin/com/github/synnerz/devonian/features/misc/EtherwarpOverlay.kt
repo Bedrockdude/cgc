@@ -1,0 +1,278 @@
+package com.github.synnerz.devonian.features.misc
+
+import com.github.synnerz.devonian.api.ChatUtils
+import com.github.synnerz.devonian.api.ItemUtils
+import com.github.synnerz.devonian.api.WorldUtils
+import com.github.synnerz.devonian.api.dungeon.DungeonScanner
+import com.github.synnerz.devonian.api.dungeon.Dungeons
+import com.github.synnerz.devonian.api.events.MousePressEvent
+import com.github.synnerz.devonian.api.events.RenderWorldEvent
+import com.github.synnerz.devonian.api.events.TickEvent
+import com.github.synnerz.devonian.features.Feature
+import com.github.synnerz.devonian.mixin.accessor.LocalPlayerAccessor
+import com.github.synnerz.devonian.utils.BlockTypes
+import com.github.synnerz.devonian.utils.render.Render3DImmediate
+import net.minecraft.core.BlockPos
+import net.minecraft.world.InteractionHand
+import net.minecraft.world.item.Items
+import net.minecraft.world.level.EmptyBlockGetter
+import net.minecraft.world.phys.BlockHitResult
+import net.minecraft.world.phys.HitResult
+import net.minecraft.world.phys.Vec3
+import net.minecraft.world.phys.shapes.CollisionContext
+import net.minecraft.world.phys.shapes.Shapes
+import java.awt.Color
+import kotlin.math.hypot
+
+object EtherwarpOverlay : Feature(
+    "etherwarpOverlay",
+    "Renders a box at the location where the etherwarp is going to be at.",
+    subcategory = "General",
+) {
+    private val SETTING_ALWAYS_FULL = addSwitch(
+        "alwaysFull",
+        false,
+        "",
+        "Always Render Full Block",
+    )
+    private val SETTING_ETHER_WIRE_WIDTH = addSlider(
+        "wireWidth",
+        3.0,
+        0.0, 10.0,
+        "",
+        "Ether Wire Width",
+    )
+    private val SETTING_ETHER_WIRE_COLOR = addColorPicker(
+        "wireColor",
+        Color(46, 221, 23, 160).rgb,
+        "",
+        "Ether Outline Color",
+    )
+    private val SETTING_ETHER_FILL_COLOR = addColorPicker(
+        "fillColor",
+        Color(96, 222, 85, 96).rgb,
+        "",
+        "Ether Fill Color",
+    )
+    private val SETTING_ETHER_FAIL_WIRE_COLOR = addColorPicker(
+        "failWireColor",
+        Color(202, 34, 7, 160).rgb,
+        "",
+        "Ether Fail Outline Color",
+    )
+    private val SETTING_ETHER_FAIL_FILL_COLOR = addColorPicker(
+        "failFillColor",
+        Color(186, 43, 30, 96).rgb,
+        "",
+        "Ether Fail Fill Color",
+    )
+    private val SETTING_WIRE_PHASE = addSwitch(
+        "usePhase",
+        true,
+        "Whether to use phase (see through) in the block highlight",
+        "Ether Wire Phase"
+    )
+    private val SETTING_FILL_PHASE = addSwitch(
+        "fillPhase",
+        true,
+        "Whether to use phase (see through) in the block highlight",
+        "Ether Fill Phase"
+    )
+    private val SETTING_ETHER_USING_CANCEL_INTERACT = addSwitch(
+        "usingCI",
+        false,
+        "Enables the etherwarp overlay even when looking at an interactable block",
+        "Ether Using CI",
+    )
+    private val SETTING_USE_SMOOTH_POSITION = addSwitch(
+        "smooth",
+        false,
+        "Uses your camera position/look rather than the servers position/look",
+        "Ether Use Smooth Position",
+    )
+    private val SETTING_DUNGEON_CORRECTION = addSwitch(
+        "dungeonCorrection",
+        false,
+        "Prevents clicks from going through if you are about to teleport" +
+                "onto the roof of a dungeon room §4Use At Your Own Risk",
+        "Dungeon Correction"
+    )
+
+    private val validWeapons = mutableListOf("ASPECT_OF_THE_END", "ASPECT_OF_THE_VOID", "ETHERWARP_CONDUIT")
+    var failReason = ""
+    private var dist = 0
+    private var res: BlockPos? = null
+
+    override fun initialize() {
+        on<TickEvent> {
+            dist = 0
+
+            val player = minecraft.player ?: return@on
+
+            val heldItem = player.getItemInHand(InteractionHand.MAIN_HAND)
+            if (
+                heldItem.item != Items.DIAMOND_SHOVEL &&
+                heldItem.item != Items.DIAMOND_SWORD &&
+                heldItem.item != Items.PLAYER_HEAD
+            ) return@on
+
+            val itemId = ItemUtils.skyblockId(heldItem) ?: return@on
+            val requireSneak = heldItem.item == Items.DIAMOND_SHOVEL || heldItem.item == Items.DIAMOND_SWORD
+
+            if (requireSneak && !player.isSteppingCarefully) return@on
+            if (!validWeapons.contains(itemId)) return@on
+
+            val extraAttributes = ItemUtils.extraAttributes(heldItem) ?: return@on
+            if (requireSneak && !extraAttributes.contains("ethermerge")) return@on
+
+            val tunedTransmission = extraAttributes.get("tuned_transmission")
+            val tunedInt = tunedTransmission?.asInt()
+            val tuners = if (tunedInt == null || tunedInt.isEmpty) 0 else tunedInt.get()
+
+            dist = 57 + tuners
+        }
+
+        on<MousePressEvent> { event ->
+            if (event.button != 1 || res == null) return@on
+            val currentRoom = DungeonScanner.currentRoom ?: return@on
+            if (res!!.y != currentRoom.height) return@on
+
+            event.cancel()
+            ChatUtils.sendMessage("&cCancelled Etherwarp to the roof of the room", true)
+        }.setEnabled(SETTING_DUNGEON_CORRECTION.state.zip(Dungeons.started, Boolean::and))
+
+        on<RenderWorldEvent> { event ->
+            failReason = ""
+
+            if (dist == 0) {
+                res = null
+                return@on
+            }
+
+            val player = minecraft.player
+            if (player == null) {
+                res = null
+                return@on
+            }
+            val world = minecraft.level
+            if (world == null) {
+                res = null
+                return@on
+            }
+
+            if (!SETTING_ETHER_USING_CANCEL_INTERACT.get()) {
+                val target = minecraft.hitResult
+                if (target != null && target.type == HitResult.Type.BLOCK) {
+                    val blockTarget = target as BlockHitResult
+                    if (BlockTypes.Interactable.contains(world.getBlockState(blockTarget.blockPos).block)) return@on
+                }
+            }
+
+            val px: Double
+            val py: Double
+            val pz: Double
+            val lookVec: Vec3
+            if (SETTING_USE_SMOOTH_POSITION.get()) {
+                val pt = minecraft.deltaTracker.getGameTimeDeltaPartialTick(false)
+                val posVec = player.getPosition(pt)
+                val camVec = player.getEyePosition(pt)
+                px = posVec.x
+                py = camVec.y
+                pz = posVec.z
+                lookVec = player.getViewVector(pt)
+            } else {
+                val playerAccessor = player as LocalPlayerAccessor
+                px = playerAccessor.lastXClient
+                py = playerAccessor.lastYClient +
+                        if (player.isShiftKeyDown) 1.27f
+                        else 1.62f
+                pz = playerAccessor.lastZClient
+                lookVec = player.calculateViewVector(playerAccessor.lastPitchClient, playerAccessor.lastYawClient)
+            }
+
+            var hitResult = WorldUtils.raycast(
+                px, py, pz,
+                lookVec.x * dist,
+                lookVec.y * dist,
+                lookVec.z * dist,
+                false,
+            )
+//            val inBlacklist = hitResult?.let { BlockTypes.Blacklist.contains(world.getBlockState(it).block) } ?: false
+            val isFenceLike = hitResult?.let { BlockTypes.FenceLike.contains(world.getBlockState(it).block) } ?: false
+
+            if (hitResult == null) {
+                failReason = "&4Can't TP: Too far!"
+                val maxDist = hypot(256.0, 16.0 * minecraft.options.effectiveRenderDistance)
+                hitResult = WorldUtils.raycast(
+                    px + lookVec.x * dist,
+                    py + lookVec.y * dist,
+                    pz + lookVec.z * dist,
+                    lookVec.x * maxDist,
+                    lookVec.y * maxDist,
+                    lookVec.z * maxDist,
+                    false,
+                )
+                if (hitResult == null) {
+                    res = hitResult
+                    return@on
+                }
+            } else {
+                val bpFoot = if (isFenceLike) hitResult.above(2) else hitResult.above(1)
+                val bpHead = if (isFenceLike) hitResult.above(3) else hitResult.above(2)
+
+                val bsFoot = world.getBlockState(bpFoot)
+                val bsHead = world.getBlockState(bpHead)
+                if (isFenceLike) {
+                    if (
+                        !((BlockTypes.AirLike.contains(bsFoot.block) || BlockTypes.Blacklist.contains(bsFoot.block)) &&
+                        BlockTypes.AirLike.contains(bsHead.block))
+                    ) failReason = "&4Can't TP: No air above!"
+                }
+                else if (
+                    !BlockTypes.AirLike.contains(bsFoot.block) ||
+                    !BlockTypes.AirLike.contains(bsHead.block) ||
+                    BlockTypes.AirThrough.contains(bsFoot.block) ||
+                    BlockTypes.AirThrough.contains(bsHead.block)
+                ) failReason = "&4Can't TP: No air above!"
+                // TODO: if the user aligns themselves in an angle where they can see the next block
+                //  they CAN actually teleport, fix this since currently it just fails currently
+//                else if (inBlacklist)
+//                    failReason = "&4Can't TP: Blacklisted Block"
+            }
+
+            val camera = minecraft.gameRenderer.mainCamera()
+            val camEntity = camera.entity()
+            if (camEntity == null) {
+                res = hitResult
+                return@on
+            }
+            res = hitResult
+
+            val outlineShape =
+                if (SETTING_ALWAYS_FULL.get()) Shapes.block()
+                else  world.getBlockState(hitResult).getShape(
+                    EmptyBlockGetter.INSTANCE,
+                    hitResult,
+                    CollisionContext.of(camEntity)
+                )
+
+            Render3DImmediate.renderWireframeShape(
+                outlineShape,
+                hitResult.x.toDouble(),
+                hitResult.y.toDouble(),
+                hitResult.z.toDouble(),
+                if (failReason.isEmpty()) SETTING_ETHER_WIRE_COLOR.getColor() else SETTING_ETHER_FAIL_WIRE_COLOR.getColor(),
+                SETTING_ETHER_WIRE_WIDTH.get(),
+                SETTING_WIRE_PHASE.get(),
+            )
+            Render3DImmediate.renderFilledShape(
+                outlineShape,
+                hitResult.x.toDouble(),
+                hitResult.y.toDouble(),
+                hitResult.z.toDouble(),
+                if (failReason.isEmpty()) SETTING_ETHER_FILL_COLOR.getColor() else SETTING_ETHER_FAIL_FILL_COLOR.getColor(),
+                SETTING_FILL_PHASE.get(),
+            )
+        }
+    }
+}

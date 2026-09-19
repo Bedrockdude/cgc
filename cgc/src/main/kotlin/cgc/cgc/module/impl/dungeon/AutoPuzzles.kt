@@ -27,7 +27,8 @@ class AutoPuzzles : CgcModule(
 	displayName = "Auto Puzzles",
 	category = ModuleCategory.DUNGEONS,
 	description = "Automatically solves selected Dungeon puzzles with human-like movement, aiming, interactions, and configurable guidance.",
-	defaultEnabled = false
+	defaultEnabled = false,
+	visibleInGui = false
 ), ClientTickStartModule, ClientTickModule, BlockChangeModule, WorldRenderExtractModule, WorldLoadModule {
 	val blaze = BlazeSubModule(this)
 	val creeperBeams = CreeperBeamsSubModule(this)
@@ -95,7 +96,10 @@ class AutoPuzzles : CgcModule(
 
 	override fun onWorldRenderExtract(context: LevelRenderContext) {
 		val controller = activeController ?: return
-		runCatching { controller.render(context) }.onFailure { error ->
+		runCatching {
+			controller.frame(Minecraft.getInstance())
+			controller.render(context)
+		}.onFailure { error ->
 			controller.stop("an internal error occurred (${error::class.simpleName})", terminal = true)
 		}
 	}

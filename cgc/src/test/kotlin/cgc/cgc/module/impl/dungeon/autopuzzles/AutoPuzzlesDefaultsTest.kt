@@ -32,7 +32,7 @@ class AutoPuzzlesDefaultsTest {
 		assertEquals(5.0, module.iceFill.lineThickness.value.toDouble())
 		assertEquals(120L, module.waterboard.actionDelay.value.toLong())
 		assertEquals(
-			listOf("Turn Speed", "Path Color", "Line Thickness", "Set Fall Y", "Set Floor 1 Start", "Set Floor 2 Start", "Set Floor 3 Start"),
+			listOf("Turn Speed", "Path Color", "Line Thickness", "Record Floor Route", "Set Fall Y", "Set Floor 1 Start", "Set Floor 2 Start", "Set Floor 3 Start"),
 			module.iceFill.settings.map { it.name }
 		)
 	}

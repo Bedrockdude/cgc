@@ -1,5 +1,6 @@
 package cgc.cgc.module.impl.dungeon.autopuzzles
 
+import cgc.cgc.runtime.PacketOrderManager
 import net.minecraft.core.BlockPos
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.level.block.Blocks
@@ -19,8 +20,11 @@ object AutoPuzzleInteraction {
 		val hit = context.player.pick(reach, 0.0f, false) as? BlockHitResult ?: return false
 		if (hit.type != HitResult.Type.BLOCK || hit.blockPos != expected) return false
 		val gameMode = context.client.gameMode ?: return false
-		gameMode.useItemOn(context.player, InteractionHand.MAIN_HAND, hit)
-		context.player.swing(InteractionHand.MAIN_HAND)
-		return true
+		var consumed = false
+		val dispatched = PacketOrderManager.tryRunProtectedActionImmediately {
+			consumed = gameMode.useItemOn(context.player, InteractionHand.MAIN_HAND, hit).consumesAction()
+			context.player.swing(InteractionHand.MAIN_HAND)
+		}
+		return dispatched && consumed
 	}
 }

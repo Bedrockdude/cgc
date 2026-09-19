@@ -3,7 +3,8 @@ package cgc.cgc.mixin;
 import cgc.cgc.client.CgcCommandRegistry;
 import cgc.cgc.config.CgcSettings;
 import cgc.cgc.module.impl.general.PartyNamesTweaks;
-import com.google.common.base.Strings;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.google.common.collect.Lists;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.ParseResults;
@@ -12,7 +13,6 @@ import com.mojang.brigadier.context.CommandContextBuilder;
 import com.mojang.brigadier.context.SuggestionContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.suggestion.Suggestions;
-import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import com.mojang.brigadier.tree.CommandNode;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 import net.minecraft.ChatFormatting;
@@ -23,7 +23,6 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.multiplayer.ClientSuggestionProvider;
 import net.minecraft.commands.Commands;
-import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.ComponentUtils;
 import net.minecraft.network.chat.Style;
@@ -31,29 +30,21 @@ import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @Mixin(CommandSuggestions.class)
 public class CommandSuggestionsMixin {
-	@Unique
-	private static final Pattern CGC_WHITESPACE_PATTERN = Pattern.compile("(\\s+)");
-
 	@Shadow
 	@Final
 	EditBox input;
-
-	@Shadow
-	@Final
-	private boolean commandsOnly;
 
 	@Shadow
 	private ParseResults<ClientSuggestionProvider> currentParse;
@@ -63,6 +54,12 @@ public class CommandSuggestionsMixin {
 
 	@Shadow
 	private CommandSuggestions.SuggestionsList suggestions;
+
+	@Shadow
+	private boolean currentParseIsCommand;
+
+	@Shadow
+	private boolean currentParseIsMessage;
 
 	@Shadow
 	@Final
@@ -99,15 +96,19 @@ public class CommandSuggestionsMixin {
 	@Unique
 	private boolean cgc$customCommand;
 
-	/**
-	 * @author CGC
-	 * @reason Use CGC's local Brigadier dispatcher for prefixed chat commands so .lc autocompletes like an RSM command.
-	 */
-	@Overwrite
-	public void updateCommandInfo() {
+	@Inject(method = "updateCommandInfo", at = @At("HEAD"), cancellable = true)
+	private void cgc$updateCustomCommandInfo(CallbackInfo ci) {
 		String string = this.input.getValue();
+		String prefix = CgcSettings.INSTANCE.getCommandPrefix().getValue();
+		this.cgc$customCommand = !prefix.isBlank() && string.startsWith(prefix);
+		if (!this.cgc$customCommand) {
+			return;
+		}
+
 		if (this.currentParse != null && !this.currentParse.getReader().getString().equals(string)) {
 			this.currentParse = null;
+			this.currentParseIsCommand = false;
+			this.currentParseIsMessage = false;
 		}
 
 		if (!this.keepSuggestions) {
@@ -117,59 +118,51 @@ public class CommandSuggestionsMixin {
 
 		this.commandUsage.clear();
 		StringReader reader = new StringReader(string);
-		String prefix = CgcSettings.INSTANCE.getCommandPrefix().getValue();
-		boolean custom = !prefix.isBlank() && string.startsWith(prefix);
-		boolean command = reader.canRead() && (reader.peek() == '/' || custom);
-
-		if (custom) {
-			reader.setCursor(prefix.length());
-		} else if (command) {
-			reader.skip();
-		}
+		reader.setCursor(prefix.length());
 
 		if (this.minecraft.player == null) {
+			ci.cancel();
 			return;
 		}
 
-		this.cgc$customCommand = custom;
-		boolean shouldParse = this.commandsOnly || command;
+		this.currentParseIsCommand = false;
+		this.currentParseIsMessage = false;
 		int cursor = this.input.getCursorPosition();
-		if (shouldParse) {
-			CommandDispatcher<ClientSuggestionProvider> commandDispatcher = custom
-				? CgcCommandRegistry.getDispatcher()
-				: this.minecraft.player.connection.getCommands();
-			if (this.currentParse == null) {
-				this.currentParse = commandDispatcher.parse(reader, this.minecraft.player.connection.getSuggestionsProvider());
-			}
-
-			int minCursor = this.onlyShowIfCursorPastError ? reader.getCursor() : 1;
-			if (cursor >= minCursor && (this.suggestions == null || !this.keepSuggestions)) {
-				this.pendingSuggestions = commandDispatcher.getCompletionSuggestions(this.currentParse, cursor)
-					.thenApply(result -> PartyNamesTweaks.augmentSuggestions(string, result));
-				this.pendingSuggestions.thenRun(() -> {
-					if (this.pendingSuggestions.isDone()) {
-						this.cgc$updateUsageInfo();
-					}
-				});
-			}
-		} else {
-			String beforeCursor = string.substring(0, cursor);
-			int lastWordIndex = cgc$getLastWordIndex(beforeCursor);
-			Collection<String> collection = this.minecraft.player.connection.getSuggestionsProvider().getCustomTabSuggestions();
-			this.pendingSuggestions = SharedSuggestionProvider.suggest(collection, new SuggestionsBuilder(beforeCursor, lastWordIndex));
+		CommandDispatcher<ClientSuggestionProvider> commandDispatcher = CgcCommandRegistry.getDispatcher();
+		if (this.currentParse == null) {
+			this.currentParse = commandDispatcher.parse(reader, this.minecraft.player.connection.getSuggestionsProvider());
 		}
+
+		int minCursor = this.onlyShowIfCursorPastError ? reader.getCursor() : prefix.length();
+		if (cursor >= minCursor && (this.suggestions == null || !this.keepSuggestions)) {
+			this.pendingSuggestions = commandDispatcher.getCompletionSuggestions(this.currentParse, cursor)
+				.thenApply(result -> PartyNamesTweaks.augmentSuggestions(string, result));
+			this.pendingSuggestions.thenRun(() -> {
+				if (this.pendingSuggestions.isDone()) {
+					this.cgc$updateUsageInfo();
+				}
+			});
+		}
+
+		ci.cancel();
 	}
 
-	@Unique
-	private static int cgc$getLastWordIndex(String string) {
-		if (Strings.isNullOrEmpty(string)) {
-			return 0;
-		}
-
-		int index = 0;
-		for (Matcher matcher = CGC_WHITESPACE_PATTERN.matcher(string); matcher.find(); index = matcher.end()) {
-		}
-		return index;
+	@WrapOperation(
+		method = "updateCommandInfo",
+		at = @At(
+			value = "INVOKE",
+			target = "Lcom/mojang/brigadier/CommandDispatcher;getCompletionSuggestions(Lcom/mojang/brigadier/ParseResults;I)Ljava/util/concurrent/CompletableFuture;"
+		)
+	)
+	private CompletableFuture<Suggestions> cgc$augmentServerSuggestions(
+		CommandDispatcher<ClientSuggestionProvider> commandDispatcher,
+		ParseResults<ClientSuggestionProvider> parseResults,
+		int cursor,
+		Operation<CompletableFuture<Suggestions>> original
+	) {
+		String inputValue = this.input.getValue();
+		return original.call(commandDispatcher, parseResults, cursor)
+			.thenApply(result -> PartyNamesTweaks.augmentSuggestions(inputValue, result));
 	}
 
 	@Unique

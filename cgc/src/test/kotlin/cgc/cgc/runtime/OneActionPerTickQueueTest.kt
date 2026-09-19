@@ -41,6 +41,17 @@ class OneActionPerTickQueueTest {
 	}
 
 	@Test
+	fun `marking vanilla use consumes slot without deferring its packets`() {
+		val queue = OneActionPerTickQueue<String>()
+
+		queue.markUsed()
+		queue.markUsed()
+
+		assertFalse(queue.tryRunImmediately { error("vanilla use must consume the immediate slot") })
+		assertEquals(0, queue.pendingCount())
+	}
+
+	@Test
 	fun `unavailable connection retains deferred actions`() {
 		val queue = OneActionPerTickQueue<String>()
 

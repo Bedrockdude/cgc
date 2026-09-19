@@ -1,0 +1,50 @@
+package com.github.synnerz.devonian.features.dungeons
+
+import com.github.synnerz.devonian.api.dungeon.Stages
+import com.github.synnerz.devonian.api.events.RenderOverlayEvent
+import com.github.synnerz.devonian.api.events.TabUpdateEvent
+import com.github.synnerz.devonian.api.events.TickEvent
+import com.github.synnerz.devonian.api.events.WorldChangeEvent
+import com.github.synnerz.devonian.config.Categories
+import com.github.synnerz.devonian.hud.texthud.TextHudFeature
+import com.github.synnerz.devonian.utils.BasicState
+
+object DeathsDisplay : TextHudFeature(
+    "deathsDisplay",
+    "Displays the current amount of Team Deaths.",
+    Categories.DUNGEONS,
+    "catacombs",
+    subcategory = "HUD",
+) {
+    override fun createRequirements(): List<BasicState<Boolean>?> {
+        return super.createRequirements() + listOf(Stages.Root.isActiveState)
+    }
+
+    private val deathsRegex = "^Team Deaths: (\\d+)$".toRegex()
+    private var deathCount = 0
+
+    override fun initialize() {
+        on<TabUpdateEvent> { event ->
+            val matches = event.matches(deathsRegex) ?: return@on
+            val ( amount ) = matches
+
+            deathCount = amount.toInt()
+        }
+
+        on<TickEvent> {
+            val count = deathCount
+            val format = if (count > 2) "&4" else "&c"
+            setLine("&8&lDeaths&f: ${format}$count")
+        }
+
+        on<RenderOverlayEvent> { event ->
+            draw(event.ctx)
+        }
+    }
+
+    override fun onWorldChange(event: WorldChangeEvent) {
+        deathCount = 0
+    }
+
+    override fun getEditText(): List<String> = listOf("&8&lDeaths&f: &43")
+}

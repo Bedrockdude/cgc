@@ -37,6 +37,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		WAITING,
 		AIM_ROUTE_WARP,
 		WAIT_ROUTE_WARP,
+		STRAFE_AIM,
 		STRAFE,
 		TURN,
 		STAIR_AIM,
@@ -49,8 +50,23 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 	}
 
 	private data class Launch(val direction: Direction, val cursor: Int)
+	private data class RouteRecording(
+		val floorIndex: Int,
+		val signature: String,
+		val spaces: Set<BlockPos>,
+		val end: BlockPos,
+		val cells: MutableList<BlockPos>,
+		val facings: MutableList<Direction>,
+		val movements: MutableList<IceFillRouteStore.MovementInput?>
+	)
+	private data class AppliedRoute(
+		val floor: IceFillSolver.Floor,
+		val facings: Map<BlockPos, Direction>,
+		val movements: Map<BlockPos, IceFillRouteStore.MovementInput>
+	)
 
 	private val calibrationStore = IceFillCalibrationStore()
+	private val routeStore = IceFillRouteStore()
 	private val aim = AutoPuzzleAimController()
 	private var state = State.WAITING
 	private var lockedRun = Long.MIN_VALUE
@@ -58,6 +74,8 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 	private var roomSignature: String? = null
 	private var solvedSignature: String? = null
 	private var floors = emptyList<IceFillSolver.Floor>()
+	private var recordedFacings = emptyList<Map<BlockPos, Direction>>()
+	private var recordedMovements = emptyList<Map<BlockPos, IceFillRouteStore.MovementInput>>()
 	private var renderPaths = emptyList<List<Vec3>>()
 	private var worldStarts = emptyList<BlockPos>()
 	private var fallY = Double.NaN
@@ -79,6 +97,44 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 	private val recoveryCounts = IntArray(3)
 	private var interferenceReason: String? = null
 	private var preflightReason: String? = null
+	private var routeRecording: RouteRecording? = null
+	private val reportedLegacyLayouts = hashSetOf<String>()
+
+	fun toggleRouteRecording() {
+		val context = calibrationContext() ?: return
+		ensureSolved(context)
+		if (routeRecording != null) {
+			finishRouteRecording(context)
+			return
+		}
+		val located = floors.withIndex().mapNotNull { (index, floor) ->
+			routeCellAt(context.player.position(), floor.spaces)?.let { index to it }
+		}.minByOrNull { (_, cell) -> horizontalDistanceSqr(context.player.position(), cell.center) }
+		if (located == null) {
+			ChatUtils.chat("§c[Auto Puzzles] Ice Fill recording failed: stand on the first ice cell of a floor.")
+			return
+		}
+		val (index, cell) = located
+		val floor = floors[index]
+		if (cell != floor.start) {
+			ChatUtils.chat("§c[Auto Puzzles] Ice Fill recording failed: this is not the detected first cell of Floor ${index + 1}.")
+			return
+		}
+		cleanupInput()
+		state = State.WAITING
+		lockedRun = context.runSequence
+		val signature = layoutSignature(context, floor.spaces)
+			routeRecording = RouteRecording(
+			floorIndex = index,
+			signature = signature,
+			spaces = floor.spaces.toSet(),
+			end = floor.end,
+			cells = arrayListOf(cell),
+			facings = arrayListOf(cardinalFacing(context.player.yRot)),
+			movements = arrayListOf(null)
+		)
+		ChatUtils.chat("§a[Auto Puzzles] Recording Ice Fill Floor ${index + 1}. Traverse every cell, then press the recording key again on the final cell.")
+	}
 
 	fun captureFallY() {
 		val context = calibrationContext() ?: return
@@ -129,14 +185,25 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 	override fun tick(context: AutoPuzzleContext) {
 		if (!IceFillSolver.scanAreaLoaded(context)) {
 			floors = emptyList()
+			recordedFacings = emptyList()
+			recordedMovements = emptyList()
 			renderPaths = emptyList()
 			solvedSignature = null
+			routeRecording = null
 			if (state !in setOf(State.WAITING, State.DONE, State.WAIT_GREEN)) {
 				stop("part of the Ice Fill room became unloaded", terminal = true)
 			}
 			return
 		}
 		ensureSolved(context)
+		if (routeRecording != null) {
+			tickRouteRecording(context)
+			val recording = routeRecording
+			if (recording != null) {
+				ChatUtils.actionBar("§c● RECORDING ICE FILL FLOOR ${recording.floorIndex + 1} §7(${recording.cells.size}/${recording.spaces.size} cells) §ePress the record key to save")
+			}
+			return
+		}
 		if (lockedRun == context.runSequence || state == State.DONE) return
 		val puzzleState = context.puzzleState(DungeonPuzzle.ICE_FILL)
 		if (puzzleState == DungeonPuzzleState.GREEN && state == State.WAITING) {
@@ -190,6 +257,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		when (state) {
 			State.AIM_ROUTE_WARP -> tickAimRouteWarp(context)
 			State.WAIT_ROUTE_WARP -> tickWaitRouteWarp(context)
+			State.STRAFE_AIM -> tickStrafeAim(context)
 			State.STRAFE -> tickStrafe(context)
 			State.TURN -> tickTurn(context)
 			State.STAIR_AIM -> tickStairAim(context)
@@ -203,9 +271,138 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 
 	private fun ensureSolved(context: AutoPuzzleContext) {
 		if (solvedSignature == context.roomSignature && floors.isNotEmpty()) return
-		floors = IceFillSolver.observe(context)
+		val applied = IceFillSolver.observe(context).map { floor -> applyRecordedRoute(context, floor) }
+		floors = applied.map { it.floor }
+		recordedFacings = applied.map { it.facings }
+		recordedMovements = applied.map { it.movements }
 		solvedSignature = context.roomSignature
 		renderPaths = floors.map { floor -> floor.path.map { Vec3(it.x + 0.5, it.y + 0.01, it.z + 0.5) } }
+	}
+
+	private fun applyRecordedRoute(
+		context: AutoPuzzleContext,
+		floor: IceFillSolver.Floor
+	): AppliedRoute {
+		val stored = routeStore.route(layoutSignature(context, floor.spaces))
+			?: return AppliedRoute(floor, emptyMap(), emptyMap())
+		val cells = stored.cells.map { AutoPuzzleRoomCoordinates.worldBlock(context.room, it.x, it.y, it.z) }
+		val valid = cells.size == floor.spaces.size && cells.toSet() == floor.spaces &&
+			cells.firstOrNull() == floor.start && cells.lastOrNull() == floor.end &&
+			cells.zipWithNext().all { (first, second) -> manhattanHorizontal(first, second) == 1 && first.y == second.y }
+		if (!valid) return AppliedRoute(floor, emptyMap(), emptyMap())
+		val facings = if (stored.roomRelativeFacings) {
+			stored.facings.map { AutoPuzzleRoomCoordinates.worldDirection(context.room, it) }
+		} else {
+			// Version-one recordings did not save their room rotation, so their
+			// route is reusable but their exact camera frame cannot be recovered.
+			emptyList()
+		}
+		val facingMap = cells.indices
+			.takeIf { facings.size == cells.size }
+			?.associate { cells[it] to facings[it] }
+			.orEmpty()
+		val movementMap = cells.indices.mapNotNull { index ->
+			stored.movements.getOrNull(index)?.let { cells[index] to it }
+		}.toMap()
+		if ((!stored.roomRelativeFacings || movementMap.isEmpty()) && reportedLegacyLayouts.add(layoutSignature(context, floor.spaces))) {
+			ChatUtils.chat("§e[Auto Puzzles] This Ice Fill route predates exact transition recording. Its cell order is preserved; re-record it once for exact replay.")
+		}
+		return AppliedRoute(floor.copy(path = cells), facingMap, movementMap)
+	}
+
+	private fun tickRouteRecording(context: AutoPuzzleContext) {
+		val recording = routeRecording ?: return
+		val cell = routeCellAt(context.player.position(), recording.spaces) ?: return
+		val facing = cardinalFacing(context.player.yRot)
+		if (cell == recording.cells.last()) {
+			recording.facings[recording.facings.lastIndex] = facing
+			activeMovementInput(context)?.let { recording.movements[recording.movements.lastIndex] = it }
+			return
+		}
+		if (cell in recording.cells || manhattanHorizontal(recording.cells.last(), cell) != 1 || cell.y != recording.cells.last().y) {
+			ChatUtils.chat("§c[Auto Puzzles] Ice Fill recording cancelled: the route revisited or skipped an ice cell.")
+			routeRecording = null
+			return
+		}
+		val departureFacing = recording.facings.last()
+		val movement = direction(recording.cells.last(), cell)
+		val pressed = activeMovementInput(context)
+		recording.movements[recording.movements.lastIndex] = movement?.let { worldMovement ->
+			pressed?.takeIf { movementDirection(departureFacing, it) == worldMovement }
+				?: inferMovementInput(departureFacing, worldMovement)
+		}
+		recording.cells += cell
+		recording.facings += facing
+		recording.movements += null
+	}
+
+	private fun finishRouteRecording(context: AutoPuzzleContext) {
+		val recording = routeRecording ?: return
+		tickRouteRecording(context)
+		if (routeRecording == null) return
+		if (recording.cells.size != recording.spaces.size || recording.cells.toSet() != recording.spaces || recording.cells.last() != recording.end) {
+			ChatUtils.chat("§c[Auto Puzzles] Ice Fill recording is incomplete (${recording.cells.size}/${recording.spaces.size} cells); recording remains active.")
+			return
+		}
+		val relativeCells = recording.cells.map { AutoPuzzleRoomCoordinates.relativeBlock(context.room, it) }
+		val relativeFacings = recording.facings.map { AutoPuzzleRoomCoordinates.relativeDirection(context.room, it) }
+		runCatching {
+			routeStore.save(recording.signature, IceFillRouteStore.Route(relativeCells, relativeFacings, movements = recording.movements.toList()))
+		}.onFailure {
+			ChatUtils.chat("§c[Auto Puzzles] Ice Fill route could not be saved.")
+			return
+		}
+		val floor = floors[recording.floorIndex].copy(path = recording.cells.toList())
+		floors = floors.toMutableList().also { it[recording.floorIndex] = floor }
+		recordedFacings = recordedFacings.toMutableList().also {
+			while (it.size < floors.size) it += emptyMap()
+			it[recording.floorIndex] = recording.cells.indices.associate { step -> recording.cells[step] to recording.facings[step] }
+		}
+		recordedMovements = recordedMovements.toMutableList().also {
+			while (it.size < floors.size) it += emptyMap()
+			it[recording.floorIndex] = recording.cells.indices.mapNotNull { step ->
+				recording.movements[step]?.let { movement -> recording.cells[step] to movement }
+			}.toMap()
+		}
+		renderPaths = floors.map { current -> current.path.map { Vec3(it.x + 0.5, it.y + 0.01, it.z + 0.5) } }
+		routeRecording = null
+		ChatUtils.chat("§a[Auto Puzzles] Saved Ice Fill Floor ${recording.floorIndex + 1} route for layout ${recording.signature.take(8)}.")
+	}
+
+	private fun layoutSignature(context: AutoPuzzleContext, spaces: Collection<BlockPos>): String =
+		IceFillRouteStore.layoutSignature(spaces.map { AutoPuzzleRoomCoordinates.relativeBlock(context.room, it) })
+
+	private fun routeCellAt(position: Vec3, spaces: Collection<BlockPos>): BlockPos? =
+		spaces.firstOrNull { occupiesCell(position, it) }
+
+	private fun activeMovementInput(context: AutoPuzzleContext): IceFillRouteStore.MovementInput? = when {
+		context.client.options.keyUp.isDown -> IceFillRouteStore.MovementInput.FORWARD
+		context.client.options.keyDown.isDown -> IceFillRouteStore.MovementInput.BACKWARD
+		context.client.options.keyLeft.isDown -> IceFillRouteStore.MovementInput.LEFT
+		context.client.options.keyRight.isDown -> IceFillRouteStore.MovementInput.RIGHT
+		else -> null
+	}
+
+	private fun inferMovementInput(facing: Direction, movement: Direction): IceFillRouteStore.MovementInput? = when (movement) {
+		facing -> IceFillRouteStore.MovementInput.FORWARD
+		facing.opposite -> IceFillRouteStore.MovementInput.BACKWARD
+		facing.counterClockWise -> IceFillRouteStore.MovementInput.LEFT
+		facing.clockWise -> IceFillRouteStore.MovementInput.RIGHT
+		else -> null
+	}
+
+	private fun movementDirection(facing: Direction, input: IceFillRouteStore.MovementInput): Direction = when (input) {
+		IceFillRouteStore.MovementInput.FORWARD -> facing
+		IceFillRouteStore.MovementInput.BACKWARD -> facing.opposite
+		IceFillRouteStore.MovementInput.LEFT -> facing.counterClockWise
+		IceFillRouteStore.MovementInput.RIGHT -> facing.clockWise
+	}
+
+	private fun cardinalFacing(yaw: Float): Direction = when (Math.floorMod(kotlin.math.round(yaw / 90.0f).toInt(), 4)) {
+		0 -> Direction.SOUTH
+		1 -> Direction.WEST
+		2 -> Direction.NORTH
+		else -> Direction.EAST
 	}
 
 	private fun tickWaiting(context: AutoPuzzleContext) {
@@ -332,31 +529,72 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 			}
 			return
 		}
-		val forward = frameForward ?: return stop("the Ice Fill camera frame was lost", terminal = true)
 		val nextDirection = direction(floor.path[cursor], floor.path[cursor + 1])
 			?: return stop("the Ice Fill path contains a non-adjacent edge", terminal = true)
+		val forward = frameForward ?: return stop("the Ice Fill camera frame was lost", terminal = true)
+		val recordedForward = recordedFacings.getOrNull(floorIndex)?.get(floor.path[cursor])
+		if (recordedForward != null && recordedForward != forward) {
+			beginTurn(context, recordedForward)
+			return
+		}
+		val recordedMovement = recordedMovements.getOrNull(floorIndex)?.get(floor.path[cursor])
+		if (recordedMovement != null && movementDirection(forward, recordedMovement) == nextDirection) {
+			beginStrafe(context, nextDirection, recordedMovement)
+			return
+		}
 		when (nextDirection) {
 			forward -> beginRouteWarp(context, cursor + 1)
 			forward.opposite -> beginTurn(context, nextDirection)
 			forward.clockWise, forward.counterClockWise -> {
-				if (isTurnCell(floor, cursor + 1, forward)) beginRouteWarp(context, cursor + 1)
+				if (recordedForward == null && IceFillMovementPlanner.shouldPromoteLateralRun(floor.path, cursor, forward)) beginTurn(context, nextDirection)
 				else beginStrafe(context, nextDirection)
 			}
 			else -> stop("the Ice Fill path left the horizontal plane", terminal = true)
 		}
 	}
 
-	private fun beginStrafe(context: AutoPuzzleContext, movement: Direction) {
+	private fun beginStrafe(
+		context: AutoPuzzleContext,
+		movement: Direction,
+		recordedInput: IceFillRouteStore.MovementInput? = null
+	) {
 		val floor = floors[floorIndex]
 		val forward = frameForward ?: return stop("the Ice Fill camera frame was lost", terminal = true)
 		var end = cursor + 1
-		while (end < floor.path.lastIndex && direction(floor.path[end], floor.path[end + 1]) == movement && !isTurnCell(floor, end + 1, forward)) {
+		while (end < floor.path.lastIndex && direction(floor.path[end], floor.path[end + 1]) == movement) {
+			val recordedForward = recordedFacings.getOrNull(floorIndex)?.get(floor.path[end])
+			if (recordedForward != null && recordedForward != forward) break
+			val nextInput = recordedMovements.getOrNull(floorIndex)?.get(floor.path[end])
+			if (recordedInput != null && nextInput != recordedInput) break
 			end++
 		}
 		strafeEndIndex = end
 		strafeStartedIndex = cursor
-		val key = if (movement == forward.counterClockWise) context.client.options.keyLeft else context.client.options.keyRight
+		val key = when (recordedInput) {
+			IceFillRouteStore.MovementInput.FORWARD -> context.client.options.keyUp
+			IceFillRouteStore.MovementInput.BACKWARD -> context.client.options.keyDown
+			IceFillRouteStore.MovementInput.LEFT -> context.client.options.keyLeft
+			IceFillRouteStore.MovementInput.RIGHT -> context.client.options.keyRight
+			null -> if (movement == forward.counterClockWise) context.client.options.keyLeft else context.client.options.keyRight
+		}
 		strafeKey = key
+		val look = horizontalLookPoint(context, forward)
+		aim.start(context, look, settings.turnSpeed.value.toDouble(), AutoPuzzleAimProfile.ICE_TURN)
+		stateAtMs = context.nowMs
+		state = State.STRAFE_AIM
+	}
+
+	private fun tickStrafeAim(context: AutoPuzzleContext) {
+		val current = routeSource() ?: return stop("the Ice Fill strafe source was lost", terminal = true)
+		if (!occupiesCell(context.player.position(), current)) {
+			return stop("the player moved away while aligning the Ice Fill strafe", terminal = true)
+		}
+		if (!aim.update(context).finished) {
+			if (context.nowMs - stateAtMs >= TURN_TIMEOUT_MS) stop("the Ice Fill strafe alignment timed out", terminal = true)
+			return
+		}
+		aim.clear()
+		val key = strafeKey ?: return stop("the Ice Fill strafe key was lost", terminal = true)
 		lease?.press(key)
 		stateAtMs = context.nowMs
 		state = State.STRAFE
@@ -373,7 +611,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 			if (nearest > cursor + 1) return stop("the strafe skipped an Ice Fill cell", terminal = true)
 			if (nearest == cursor + 1) cursor = nearest
 		}
-		if (nearCell(context.player.position(), end, STRAFE_ARRIVAL_DISTANCE)) {
+		if (occupiesCell(context.player.position(), end)) {
 			cursor = strafeEndIndex
 			strafeKey?.let { lease?.release(it) }
 			strafeKey = null
@@ -387,14 +625,10 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 
 	private fun beginTurn(context: AutoPuzzleContext, direction: Direction) {
 		val current = floors[floorIndex].path[cursor]
-		if (!nearCell(context.player.position(), current, TURN_CENTER_DISTANCE)) {
-			return stop("the player was not centered on the Ice Fill turn cell", terminal = true)
+		if (!occupiesCell(context.player.position(), current)) {
+			return stop("the player was no longer on the Ice Fill turn cell", terminal = true)
 		}
-		val target = Vec3(
-			context.player.eyePosition.x + direction.stepX * TURN_LOOK_DISTANCE,
-			context.player.eyePosition.y,
-			context.player.eyePosition.z + direction.stepZ * TURN_LOOK_DISTANCE
-		)
+		val target = horizontalLookPoint(context, direction)
 		frameForward = direction
 		aim.start(context, target, settings.turnSpeed.value.toDouble(), AutoPuzzleAimProfile.ICE_TURN)
 		state = State.TURN
@@ -403,7 +637,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 
 	private fun tickTurn(context: AutoPuzzleContext) {
 		val current = routeSource() ?: return stop("the Ice Fill turn cell was lost", terminal = true)
-		if (!nearCell(context.player.position(), current, TURN_CENTER_DISTANCE)) {
+		if (!occupiesCell(context.player.position(), current)) {
 			return stop("the player moved away from the Ice Fill turn cell", terminal = true)
 		}
 		if (!aim.update(context).finished) {
@@ -411,7 +645,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 			return
 		}
 		aim.clear()
-		beginRouteWarp(context, cursor + 1)
+		decideNext(context)
 	}
 
 	private fun beginStairTransition(context: AutoPuzzleContext) {
@@ -538,7 +772,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		val floor = floors.getOrNull(floorIndex) ?: return stop("the failed Ice Fill floor was lost", terminal = true)
 		val start = worldStarts[floorIndex]
 		if (resetReady(context, floor, start)) {
-			val refreshed = IceFillSolver.observe(context)
+			val refreshed = IceFillSolver.observe(context).map { applyRecordedRoute(context, it).floor }
 			if (refreshed.size != 3 || refreshed[floorIndex].spaces != floor.spaces || refreshed[floorIndex].path.isEmpty()) {
 				return stop("the reset Ice Fill floor could not be re-solved", terminal = true)
 			}
@@ -587,11 +821,14 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 	}
 
 	override fun render(context: LevelRenderContext) {
+		if (routeRecording != null) return
 		val width = settings.lineThickness.value.toFloat()
 		for (path in renderPaths) {
 			CgcRenderer3D.lineList(path, settings.pathColor.value, settings.pathColor.value, depth = false, width = width)
 		}
 	}
+
+	override fun frame(client: Minecraft) = aim.frameUpdate(client)
 
 	private fun validatedLaunch(context: AutoPuzzleContext, start: BlockPos, floor: IceFillSolver.Floor): Launch? {
 		val firstIce = floor.path.firstOrNull() ?: return null
@@ -650,8 +887,15 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		return lateralX * lateralX + lateralZ * lateralZ <= STAIR_CORRIDOR_DISTANCE * STAIR_CORRIDOR_DISTANCE
 	}
 
-	private fun isTurnCell(floor: IceFillSolver.Floor, index: Int, forward: Direction): Boolean =
-		index < floor.path.lastIndex && direction(floor.path[index], floor.path[index + 1]) == forward.opposite
+	private fun horizontalLookPoint(context: AutoPuzzleContext, direction: Direction): Vec3 {
+		val eye = context.player.eyePosition
+		val vertical = -kotlin.math.tan(Math.toRadians(context.player.xRot.toDouble())) * TURN_LOOK_DISTANCE
+		return Vec3(
+			eye.x + direction.stepX * TURN_LOOK_DISTANCE,
+			eye.y + vertical,
+			eye.z + direction.stepZ * TURN_LOOK_DISTANCE
+		)
+	}
 
 	private fun direction(from: BlockPos, to: BlockPos): Direction? = when {
 		to.y != from.y -> null
@@ -682,6 +926,11 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 	private fun nearCell(position: Vec3, feet: BlockPos, distance: Double): Boolean =
 		horizontalDistanceSqr(position, feet.center) <= distance * distance && kotlin.math.abs(position.y - feet.y) <= 0.80
 
+	private fun occupiesCell(position: Vec3, feet: BlockPos): Boolean {
+		val horizontal = BlockPos.containing(position.x, feet.y.toDouble(), position.z)
+		return horizontal.x == feet.x && horizontal.z == feet.z && kotlin.math.abs(position.y - feet.y) <= 0.80
+	}
+
 	private fun horizontalDistanceSqr(position: Vec3, target: Vec3): Double {
 		val dx = position.x - target.x
 		val dz = position.z - target.z
@@ -707,6 +956,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		val wasActive = lease != null || state !in setOf(State.WAITING, State.DONE)
 		if (terminal && wasActive && runSequence > 0L) lockedRun = runSequence
 		cleanupInput()
+		routeRecording = null
 		state = State.WAITING
 		if (wasActive) ChatUtils.chat("§c[Auto Puzzles] Ice Fill stopped: $reason.")
 	}
@@ -714,10 +964,13 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 	override fun leaveRoom() {
 		if (state !in setOf(State.WAITING, State.DONE, State.WAIT_GREEN)) stop("the Ice Fill room was left", terminal = true)
 		floors = emptyList()
+		recordedFacings = emptyList()
+		recordedMovements = emptyList()
 		renderPaths = emptyList()
 		solvedSignature = null
 		roomSignature = null
 		preflightReason = null
+		routeRecording = null
 	}
 
 	override fun runChanged(runSequence: Long) {
@@ -728,6 +981,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		roomSignature = null
 		recoveryCounts.fill(0)
 		preflightReason = null
+		routeRecording = null
 	}
 
 	override fun worldReset() {
@@ -735,10 +989,13 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		cleanupInput()
 		state = State.WAITING
 		floors = emptyList()
+		recordedFacings = emptyList()
+		recordedMovements = emptyList()
 		renderPaths = emptyList()
 		solvedSignature = null
 		roomSignature = null
 		preflightReason = null
+		routeRecording = null
 	}
 
 	private fun cleanupInput() {
@@ -761,9 +1018,7 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		const val WARP_LANDING_DISTANCE = 0.72
 		const val ROUTE_SOURCE_DISTANCE = 0.72
 		const val CELL_PROGRESS_DISTANCE = 0.45
-		const val STRAFE_ARRIVAL_DISTANCE = 0.28
 		const val STRAFE_CORRIDOR_DISTANCE = 0.80
-		const val TURN_CENTER_DISTANCE = 0.38
 		const val STAIR_SOURCE_DISTANCE = 0.55
 		const val STAIR_ARRIVAL_DISTANCE = 0.45
 		const val STAIR_CORRIDOR_DISTANCE = 0.65
@@ -781,4 +1036,28 @@ class IceFillController(private val settings: IceFillSubModule) : AutoPuzzleCont
 		const val TURN_LOOK_DISTANCE = 8.0
 		const val MAX_STAIR_HORIZONTAL = 5
 	}
+}
+
+internal object IceFillMovementPlanner {
+	fun shouldPromoteLateralRun(path: List<BlockPos>, cursor: Int, forward: Direction): Boolean {
+		if (cursor !in 0 until path.lastIndex) return false
+		val movement = direction(path[cursor], path[cursor + 1]) ?: return false
+		if (movement != forward.clockWise && movement != forward.counterClockWise) return false
+		var end = cursor + 1
+		while (end < path.lastIndex && direction(path[end], path[end + 1]) == movement) end++
+		val runLength = end - cursor
+		val following = if (end < path.lastIndex) direction(path[end], path[end + 1]) else null
+		return runLength >= MIN_PROMOTED_RUN_LENGTH || following == forward.opposite
+	}
+
+	private fun direction(from: BlockPos, to: BlockPos): Direction? = when {
+		to.y != from.y -> null
+		to.x - from.x == 1 && to.z == from.z -> Direction.EAST
+		to.x - from.x == -1 && to.z == from.z -> Direction.WEST
+		to.z - from.z == 1 && to.x == from.x -> Direction.SOUTH
+		to.z - from.z == -1 && to.x == from.x -> Direction.NORTH
+		else -> null
+	}
+
+	private const val MIN_PROMOTED_RUN_LENGTH = 2
 }

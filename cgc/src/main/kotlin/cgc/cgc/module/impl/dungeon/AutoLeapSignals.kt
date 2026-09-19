@@ -1,5 +1,6 @@
 package cgc.cgc.module.impl.dungeon
 
+import net.minecraft.core.BlockPos
 import net.minecraft.world.phys.Vec3
 import java.util.Locale
 import kotlin.math.abs
@@ -47,6 +48,9 @@ internal object AutoLeapSignals {
 			&& position.x in I4_MIN_X..I4_MAX_X
 			&& position.z in I4_MIN_Z..I4_MAX_Z
 
+	fun isI4DeviceBlock(position: BlockPos): Boolean =
+		position in i4DeviceBlocks
+
 	fun keyPickup(message: String): DungeonKeyKind? {
 		val target = keyPickupPattern.matchEntire(normalize(message))?.groupValues?.get(1) ?: return null
 		return when {
@@ -63,4 +67,31 @@ internal object AutoLeapSignals {
 	private const val I4_MAX_X = 65.0
 	private const val I4_MIN_Z = 34.0
 	private const val I4_MAX_Z = 37.0
+	private val i4DeviceBlocks = buildSet {
+		for (x in 64..68 step 2) {
+			for (y in 126..130 step 2) {
+				add(BlockPos(x, y, 50))
+			}
+		}
+	}
+}
+
+internal class I4BlockCompletionTracker {
+	private val completedBlocks = mutableSetOf<BlockPos>()
+
+	fun observeTransition(position: BlockPos, wasEmerald: Boolean, isBlueTerracotta: Boolean): Boolean {
+		if (!wasEmerald || !isBlueTerracotta || !AutoLeapSignals.isI4DeviceBlock(position)) {
+			return false
+		}
+
+		return completedBlocks.add(position) && completedBlocks.size == I4_DEVICE_BLOCK_COUNT
+	}
+
+	fun reset() {
+		completedBlocks.clear()
+	}
+
+	private companion object {
+		private const val I4_DEVICE_BLOCK_COUNT = 9
+	}
 }

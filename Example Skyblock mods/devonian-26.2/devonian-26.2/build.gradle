@@ -1,0 +1,115 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+import java.time.Instant
+
+plugins {
+	id "net.fabricmc.fabric-loom" version "${loom_version}"
+	id "maven-publish"
+	id "org.jetbrains.kotlin.jvm" version "2.3.20"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+configurations {
+	embed
+	implementation.extendsFrom(embed)
+}
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	mavenCentral()
+	maven { url = "https://api.modrinth.com/maven" }
+	maven { url = "https://jitpack.io" }
+	maven { url = "https://repo.hypixel.net/repository/Hypixel/" }
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+	implementation "net.fabricmc:fabric-language-kotlin:${project.fabric_kotlin_version}"
+
+	include implementation("com.github.Synnerz:talium:fabric~26.2-SNAPSHOT")
+	implementation "net.hypixel:mod-api:1.0.1"
+
+	api("maven.modrinth:mOgUt4GM:njXb639R")
+}
+
+processResources {
+	inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": inputs.properties.version
+    }
+
+    def gitCommitHash = System.getenv("GIT_COMMIT_HASH") ?:
+        "git rev-parse HEAD".execute().text.trim()
+    inputs.property "gitCommitHash", gitCommitHash
+
+    def gitCommitTime = System.getenv("GIT_COMMIT_TIME") ?:
+        "git show -s --format=%aI HEAD".execute(["TZ=UTC"], null).text.trim()
+    inputs.property "gitCommitTime", gitCommitTime
+
+    def buildTime = Instant.now().toString()
+    inputs.property("buildTime", buildTime)
+
+    def gitCommitMessage = System.getenv("GIT_COMMIT_MESSAGE") ?: "<LOCAL BUILD>"
+
+    filesMatching("**/build.properties") {
+        expand(
+            gitCommitHash: gitCommitHash,
+            gitCommitTime: gitCommitTime,
+            gitCommitMessage: gitCommitMessage,
+            buildTime: buildTime,
+            version: inputs.properties.version,
+        )
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+tasks.withType(KotlinCompile).configureEach {
+	kotlinOptions {
+		jvmTarget = 25
+	}
+}
+
+java {
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	inputs.property "archivesName", project.base.archivesName
+
+	from {
+		configurations.embed.collect { it.isDirectory() ? it : zipTree(it) }
+	}
+
+	from("LICENSE") {
+		rename { "${it}_${inputs.properties.archivesName}"}
+	}
+}
+
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			artifactId = project.archives_base_name
+			from components.java
+		}
+	}
+
+	repositories {}
+}
+
+loom {
+    accessWidenerPath = file("src/main/resources/devonian.accesswidener")
+}

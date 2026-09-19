@@ -227,6 +227,36 @@ class SimonSaysAimControllerTest {
 		assertTrue(controller.currentPlan()!!.durationMs > 260L)
 	}
 
+	@Test
+	fun `fresh Blaze style movement accelerates and decelerates around its midpoint`() {
+		val controller = SimonSaysAimController()
+		controller.start(
+			start = Rotation(0.0f, 0.0f),
+			target = Rotation(70.0f, -18.0f),
+			settings = settings,
+			mode = AimMode.START_BUTTON,
+			nowMs = 1_000L,
+			seed = 81L,
+			timing = AimTimingProfile(
+				minimumSpeed = 0.25,
+				maximumSpeed = 2.80,
+				maximumDurationMs = 500L,
+				maximumAngularVelocity = 760.0
+			)
+		)
+		val plan = controller.currentPlan()!!
+		fun speedAt(elapsed: Long): Double {
+			val before = controller.update(plan.startedAtMs + elapsed - 1L).rotation
+			val after = controller.update(plan.startedAtMs + elapsed).rotation
+			return magnitude(delta(before, after, 0.001))
+		}
+		val early = speedAt(5L)
+		val middle = speedAt(plan.durationMs / 2)
+		val late = speedAt(plan.durationMs - 4L)
+		assertTrue(middle > early * 2.0)
+		assertTrue(middle > late * 2.0)
+	}
+
 	private fun controllerFor(start: Rotation, target: Rotation, seed: Long): SimonSaysAimController =
 		SimonSaysAimController().also {
 			it.start(start, target, settings, AimMode.NORMAL_BUTTON, nowMs = 1_000L, seed = seed)

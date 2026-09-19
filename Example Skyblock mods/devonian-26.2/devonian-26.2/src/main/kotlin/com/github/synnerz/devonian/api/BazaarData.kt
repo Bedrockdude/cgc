@@ -1,0 +1,53 @@
+package com.github.synnerz.devonian.api
+
+data class BazaarData(
+    val success: Boolean,
+    val lastUpdate: Long,
+    val products: Map<String, Products>
+) {
+    data class QuickStatus(
+        val productId: String,
+        val sellPrice: Float,
+        val sellVolume: Int,
+        val sellMovingWeek: Long,
+        val sellOrders: Int,
+        val buyPrice: Float,
+        val buyVolume: Int,
+        val buyMovingWeek: Long,
+        val buyOrders: Int,
+    ) {
+        companion object {
+            val EMPTY = QuickStatus(
+                "_", 0f, 0, 0L,
+                0, 0f, 0, 0L, 0
+            )
+        }
+    }
+
+    data class SellSummary(
+        val amount: Int,
+        val pricePerUnit: Float,
+        val orders: Int
+    )
+
+    data class BuySummary(
+        val amount: Int,
+        val pricePerUnit: Float,
+        val orders: Int
+    )
+
+    data class Products(
+        val product_id: String,
+        val sell_summary: List<SellSummary>,
+        val buy_summary: List<BuySummary>,
+        val quick_status: QuickStatus
+    ) {
+        companion object {
+            val EMPTY = Products("_", listOf(), listOf(), QuickStatus.EMPTY)
+        }
+    }
+
+    companion object {
+        val EMPTY = BazaarData(true, -1L, emptyMap())
+    }
+}

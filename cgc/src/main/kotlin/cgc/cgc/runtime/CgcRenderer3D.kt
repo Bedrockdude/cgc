@@ -23,17 +23,20 @@ object CgcRenderer3D {
 	private val worldTextTasks = arrayListOf<WorldTextTask>()
 	private val circleCache = hashMapOf<Int, CircleData>()
 
-	fun outlineBox(aabb: AABB, colour: Colour, depth: Boolean) {
-		lineTasks.add(BoxTask(aabb, colour, depth))
+	fun outlineBox(aabb: AABB, colour: Colour, depth: Boolean, width: Float = LINE_WIDTH) {
+		if (!width.isFinite() || width <= 0.0f) {
+			return
+		}
+		lineTasks.add(BoxTask(aabb, colour, depth, width))
 	}
 
 	fun filledBox(aabb: AABB, colour: Colour, depth: Boolean) {
 		filledTasks.add(BoxTask(aabb, colour, depth))
 	}
 
-	fun filledOutlineBox(aabb: AABB, fill: Colour, outline: Colour, depth: Boolean) {
+	fun filledOutlineBox(aabb: AABB, fill: Colour, outline: Colour, depth: Boolean, outlineWidth: Float = LINE_WIDTH) {
 		filledBox(aabb, fill, depth)
-		outlineBox(aabb, outline, depth)
+		outlineBox(aabb, outline, depth, outlineWidth)
 	}
 
 	fun circle(pos: Vec3, depth: Boolean, radius: Float, colour: Colour, slices: Int) {
@@ -95,7 +98,7 @@ object CgcRenderer3D {
 
 	private fun renderLines(source: MultiBufferSource.BufferSource, stack: PoseStack, camera: Vec3) {
 		renderLineBatch(source, stack, RenderTypes.secondaryBlockOutline(), depth = true, camera = camera)
-		renderLineBatch(source, stack, RenderTypes.linesTranslucent(), depth = false, camera = camera)
+		renderLineBatch(source, stack, CgcRenderTypes.linesThroughWalls, depth = false, camera = camera)
 	}
 
 	private fun renderLineBatch(source: MultiBufferSource.BufferSource, stack: PoseStack, type: RenderType, depth: Boolean, camera: Vec3) {
@@ -109,7 +112,7 @@ object CgcRenderer3D {
 
 		val buffer = source.getBuffer(type)
 		for (task in boxes) {
-			renderOutlineBox(stack.last(), buffer, task.aabb, task.colour)
+			renderOutlineBox(stack.last(), buffer, task)
 		}
 		for (task in circles) {
 			renderCircle(stack.last(), buffer, task)
@@ -129,7 +132,19 @@ object CgcRenderer3D {
 			return
 		}
 
-		val type = RenderTypes.debugFilledBox()
+		renderFilledBatch(source, stack, RenderTypes.debugFilledBox(), tasks.filter { it.depth })
+		renderFilledBatch(source, stack, CgcRenderTypes.filledBoxThroughWalls, tasks.filterNot { it.depth })
+	}
+
+	private fun renderFilledBatch(
+		source: MultiBufferSource.BufferSource,
+		stack: PoseStack,
+		type: RenderType,
+		tasks: List<BoxTask>
+	) {
+		if (tasks.isEmpty()) {
+			return
+		}
 		val buffer = source.getBuffer(type)
 		for (task in tasks) {
 			addFilledBoxVertices(stack.last(), buffer, task.aabb, task.colour)
@@ -168,8 +183,8 @@ object CgcRenderer3D {
 		source.endBatch()
 	}
 
-	private fun renderOutlineBox(pose: PoseStack.Pose, buffer: VertexConsumer, aabb: AABB, colour: Colour) {
-		val corners = corners(aabb)
+	private fun renderOutlineBox(pose: PoseStack.Pose, buffer: VertexConsumer, task: BoxTask) {
+		val corners = corners(task.aabb)
 		for (i in EDGE_PAIRS.indices step 2) {
 			val first = EDGE_PAIRS[i] * 3
 			val second = EDGE_PAIRS[i + 1] * 3
@@ -184,13 +199,13 @@ object CgcRenderer3D {
 			val dz = z1 - z0
 
 			buffer.addVertex(pose, x0, y0, z0)
-				.setColor(colour.argb())
+				.setColor(task.colour.argb())
 				.setNormal(pose, dx, dy, dz)
-				.setLineWidth(LINE_WIDTH)
+				.setLineWidth(task.width)
 			buffer.addVertex(pose, x1, y1, z1)
-				.setColor(colour.argb())
+				.setColor(task.colour.argb())
 				.setNormal(pose, dx, dy, dz)
-				.setLineWidth(LINE_WIDTH)
+				.setLineWidth(task.width)
 		}
 	}
 
@@ -391,7 +406,7 @@ object CgcRenderer3D {
 			else -> 1
 		}
 
-	private data class BoxTask(val aabb: AABB, val colour: Colour, val depth: Boolean)
+	private data class BoxTask(val aabb: AABB, val colour: Colour, val depth: Boolean, val width: Float = LINE_WIDTH)
 	private data class CircleTask(val pos: Vec3, val depth: Boolean, val radius: Float, val colour: Colour, val slices: Int)
 	private data class RingTask(val pos: Vec3, val depth: Boolean, val radius: Float, val colour: Colour, val slices: Int, val layers: Int)
 	private data class LineListTask(val points: List<Vec3>, val start: Colour, val end: Colour, val depth: Boolean, val width: Float)

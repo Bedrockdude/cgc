@@ -45,7 +45,7 @@ class BonzoHelper : CgcModule(
 			return false
 		}
 
-		if (ItemUtils.skyBlockId(player.mainHandItem) != BONZO_STAFF_ID) {
+		if (ItemUtils.skyBlockId(player.mainHandItem) !in BONZO_STAFF_IDS) {
 			return false
 		}
 
@@ -100,6 +100,6 @@ class BonzoHelper : CgcModule(
 	}
 
 	private companion object {
-		private const val BONZO_STAFF_ID = "BONZO_STAFF"
+		private val BONZO_STAFF_IDS = setOf("BONZO_STAFF", "STARRED_BONZO_STAFF")
 	}
 }

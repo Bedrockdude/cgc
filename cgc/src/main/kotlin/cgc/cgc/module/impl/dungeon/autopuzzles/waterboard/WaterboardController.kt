@@ -61,6 +61,7 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 	private var actions = emptyList<Action>()
 	private var actionIndex = 0
 	private var waterZeroAtMs: Long? = null
+	private var waterClickAtMs: Long? = null
 	private var nextActionAtMs = 0L
 	private var lease: AutoPuzzleInputOwner.Lease? = null
 	private var inputSession: AutoPuzzleInputSession? = null
@@ -73,6 +74,9 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 	private var aimDeadlineMs = 0L
 	private var clickRetries = 0
 	private var clickRayRetries = 0
+	private var currentClickAcknowledged = false
+	private var lateAcknowledgedLeverPos: BlockPos? = null
+	private var lateAcknowledgedUntilMs = 0L
 	private var walkTarget: Vec3? = null
 	private var walkClosestDistance = Double.POSITIVE_INFINITY
 	private var interferenceReason: String? = null
@@ -107,7 +111,7 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 			return
 		}
 		if (state != State.RECOGNIZING && !activeRecognitionValid(context)) {
-			stop("the recognized Waterboard pattern or gates changed", terminal = true)
+			stop("the recognized Waterboard gates changed unexpectedly", terminal = true)
 			return
 		}
 
@@ -150,7 +154,7 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		val warp = AutoPuzzleItems.firstEtherwarp(context)
 			?: return lockBeforeLease(context.runSequence, "no Etherwarp-capable item is in the hotbar")
 		val click = AutoPuzzleItems.firstWaterboardClickItem(context)
-			?: return lockBeforeLease(context.runSequence, "no shortbow or Dungeon Breaker is in the hotbar")
+			?: return lockBeforeLease(context.runSequence, "no Dungeon Breaker is in the hotbar")
 		val solution = WaterboardSolver.solve(recognition.pattern, recognition.gates)
 			?: return lockBeforeLease(context.runSequence, "the recognized Waterboard solution is missing")
 		val built = buildActions(context, solution)
@@ -209,7 +213,6 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 
 	private fun activeRecognitionValid(context: AutoPuzzleContext): Boolean {
 		val recognition = stableRecognition ?: return false
-		if (recognizePattern(context) != recognition.pattern) return false
 		val currentlyClosedIndices = closedGateIndices(context) ?: return false
 		val openedIndices = openedGatePositions.mapNotNullTo(hashSetOf()) { opened ->
 			(0..4).firstOrNull { index ->
@@ -220,9 +223,9 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 			initiallyClosed = recognition.gates,
 			currentlyClosed = currentlyClosedIndices,
 			previouslyOpened = openedIndices,
-			waterStarted = waterZeroAtMs != null
+			waterStarted = waterFlowExpected()
 		)) return false
-		if (waterZeroAtMs != null) {
+		if (waterFlowExpected()) {
 			for (index in recognition.gates - currentlyClosedIndices) {
 				openedGatePositions.add(AutoPuzzleRoomCoordinates.worldBlock(context.room, 0, 56, 4 - index))
 			}
@@ -321,23 +324,23 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		context: AutoPuzzleContext,
 		action: Action
 	): Result<AutoPuzzleEtherwarp.Target> {
-		val preferred = AutoPuzzleEtherwarp.target(context, action.etherwarpSupport)
-		preferred.getOrNull()?.let { return Result.success(it) }
-
-		val alternatives = buildList {
-			for (xOffset in -1..1) for (zOffset in -1..1) {
-				if (xOffset == 0 && zOffset == 0) continue
-				add(action.etherwarpSupport.offset(xOffset, 0, zOffset))
-			}
-		}.sortedBy { support ->
+		val candidates = WaterboardRoutePlanner.etherwarpSupportCandidates(
+			action.etherwarpSupport,
+			action.approach,
+			action.leverPos,
+			LEVER_REACH
+		).sortedBy { support ->
 			val landing = Vec3(support.x + 0.5, support.y + 1.0, support.z + 0.5)
-			horizontalDistance(context.player.position(), landing) * 0.35 + horizontalDistance(action.approach, landing)
+			context.player.position().distanceTo(landing) * 0.35 + action.approach.distanceTo(landing)
 		}
-		for (support in alternatives) {
-			AutoPuzzleEtherwarp.target(context, support).getOrNull()?.let { return Result.success(it) }
+		var preferredFailure: String? = null
+		for (support in candidates) {
+			val result = AutoPuzzleEtherwarp.target(context, support)
+			if (support == action.etherwarpSupport) preferredFailure = result.exceptionOrNull()?.message
+			result.getOrNull()?.let { return Result.success(it) }
 		}
 
-		val detail = preferred.exceptionOrNull()?.message ?: "the preferred support is invalid"
+		val detail = preferredFailure ?: "the preferred support is invalid"
 		return Result.failure(IllegalStateException("no visible Waterboard Etherwarp support was available near the saved position ($detail)"))
 	}
 
@@ -390,7 +393,7 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 
 	private fun beginLeverAim(context: AutoPuzzleContext, action: Action) {
 		lease?.release(context.client.options.keyShift)
-		val result = ProjectileAimPlanner.block(context, action.leverPos)
+		val result = ProjectileAimPlanner.directBlock(context, action.leverPos)
 		val point = (result as? ProjectileAimPlanner.Result.Safe)?.point
 			?: return stop((result as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
 		aim.start(context, point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.NORMAL)
@@ -429,23 +432,24 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		}
 		state = State.WAIT_ACK
 		stateAtMs = context.nowMs
+		currentClickAcknowledged = false
 		if (!AutoPuzzleInteraction.clickLever(context, action.leverPos, LEVER_REACH)) {
 			if (clickRayRetries >= MAX_CLICK_RAY_RETRIES) {
-				return stop("the live crosshair could not revalidate the current lever", terminal = true)
+				return stop("could not dispatch a verified click to the current lever", terminal = true)
 			}
 			clickRayRetries++
 			beginLeverAim(context, action)
 			return
 		}
-		if (action.scheduled.lever == WaterLever.WATER && waterZeroAtMs == null) {
-			waterZeroAtMs = context.nowMs
+		if (action.scheduled.lever == WaterLever.WATER && waterZeroAtMs == null && waterClickAtMs == null) {
+			waterClickAtMs = context.nowMs
 		}
 	}
 
 	private fun tickWaitAck(context: AutoPuzzleContext) {
 		val action = currentAction() ?: return finish()
 		val current = powered(context, action.leverPos)
-		if (current == action.expectedPowered) {
+		if (currentClickAcknowledged || current == action.expectedPowered) {
 			acknowledgeCurrentAction(context)
 			return
 		}
@@ -531,11 +535,21 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 
 	private fun isClickItem(context: AutoPuzzleContext): Boolean {
 		val selected = context.player.inventory.selectedItem
-		return AutoPuzzleItems.isShortbow(selected) || AutoPuzzleItems.isDungeonBreaker(selected)
+		return AutoPuzzleItems.isDungeonBreaker(selected)
 	}
 
 	private fun acknowledgeCurrentAction(context: AutoPuzzleContext) {
+		val completed = currentAction()
+		if (completed != null) {
+			lateAcknowledgedLeverPos = completed.leverPos
+			lateAcknowledgedUntilMs = context.nowMs + LATE_LEVER_UPDATE_GRACE_MS
+			if (completed.scheduled.lever == WaterLever.WATER && waterZeroAtMs == null) {
+				waterZeroAtMs = waterClickAtMs ?: context.nowMs
+			}
+		}
+		waterClickAtMs = null
 		actionIndex++
+		currentClickAcknowledged = false
 		clickRetries = 0
 		clickRayRetries = 0
 		nextActionAtMs = context.nowMs + settings.actionDelay.value.toLong()
@@ -547,6 +561,9 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		if (!context.player.onGround()) return false
 		return !context.level.noCollision(context.player, context.player.boundingBox.move(0.0, -SUPPORT_CHECK_DEPTH, 0.0))
 	}
+
+	private fun waterFlowExpected(): Boolean =
+		waterZeroAtMs != null || waterClickAtMs != null
 
 	private fun currentAction(): Action? = actions.getOrNull(actionIndex)
 
@@ -570,13 +587,15 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		CgcRenderer3D.worldText(text, pos, settings.countdownColor.value, depth = false, scale = 1.35f)
 	}
 
+	override fun frame(client: Minecraft) = aim.frameUpdate(client)
+
 	override fun blockChanged(pos: BlockPos, oldState: BlockState?, newState: BlockState) {
 		if (lease == null) return
 		if (pos in gatePositions) {
 			val initiallyClosed = pos in initiallyClosedGatePositions
 			val wasClosed = oldState?.`is`(BlockTags.WOOL) == true
 			val isClosed = newState.`is`(BlockTags.WOOL)
-			val expectedOpening = initiallyClosed && wasClosed && !isClosed && waterZeroAtMs != null
+			val expectedOpening = initiallyClosed && wasClosed && !isClosed && waterFlowExpected()
 			if (expectedOpening) {
 				openedGatePositions.add(pos)
 			} else if (wasClosed != isClosed || isClosed && pos in openedGatePositions) {
@@ -587,7 +606,11 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		if (pos !in leverPositions) return
 		val action = currentAction()
 		val newPowered = if (newState.block is LeverBlock) newState.getValue(LeverBlock.POWERED) else null
-		if (state == State.WAIT_ACK && action != null && pos == action.leverPos && newPowered == action.expectedPowered) return
+		if (state == State.WAIT_ACK && action != null && pos == action.leverPos) {
+			if (newPowered == action.expectedPowered) currentClickAcknowledged = true
+			return
+		}
+		if (pos == lateAcknowledgedLeverPos && AutoPuzzleContext.monotonicNowMs() <= lateAcknowledgedUntilMs) return
 		if (clickRetries > 0 && state in setOf(State.AIM_LEVER, State.WAIT_DUE) && action != null &&
 			pos == action.leverPos && newPowered == action.expectedPowered
 		) return
@@ -658,6 +681,7 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		actions = emptyList()
 		actionIndex = 0
 		waterZeroAtMs = null
+		waterClickAtMs = null
 		nextActionAtMs = 0L
 		leverPositions = emptyMap()
 		gatePositions = emptySet()
@@ -666,6 +690,9 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		interferenceReason = null
 		clickRetries = 0
 		clickRayRetries = 0
+		currentClickAcknowledged = false
+		lateAcknowledgedLeverPos = null
+		lateAcknowledgedUntilMs = 0L
 		etherwarpSlot = -1
 		clickSlot = -1
 		warpAttempts = 0
@@ -693,6 +720,7 @@ class WaterboardController(private val settings: WaterboardSubModule) : AutoPuzz
 		const val FALL_RESCUE_DELAY_MS = 500L
 		const val FALL_RESCUE_LAND_TIMEOUT_MS = 1_000L
 		const val SUPPORT_CHECK_DEPTH = 0.08
-		const val MAX_CLICK_RAY_RETRIES = 1
+		const val MAX_CLICK_RAY_RETRIES = 3
+		const val LATE_LEVER_UPDATE_GRACE_MS = 1_500L
 	}
 }

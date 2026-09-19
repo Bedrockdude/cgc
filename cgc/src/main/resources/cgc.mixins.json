@@ -20,8 +20,10 @@
 		"MinecraftTickFreezeMixin",
 		"MouseHandlerMixin",
 		"MultiPlayerGameModeMixin",
+		"MinecraftUseItemMixin",
 		"PlayerDestroySpeedMixin",
-		"accessor.AccessorAbstractContainerScreen"
+		"accessor.AccessorAbstractContainerScreen",
+		"accessor.RenderTypeAccessor"
 	],
 	"injectors": {
 		"defaultRequire": 1

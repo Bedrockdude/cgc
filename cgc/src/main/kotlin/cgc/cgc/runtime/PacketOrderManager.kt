@@ -18,6 +18,7 @@ object PacketOrderManager {
 	private val actions = ConcurrentHashMap<State, MutableList<() -> Unit>>()
 	private val receiveListeners = arrayListOf<Predicate<Packet<*>>>()
 	private val protectedPackets = OneActionPerTickQueue<Packet<*>>()
+	private var vanillaUseDepth = 0
 	@Volatile
 	private var flushingProtectedPacket: Packet<*>? = null
 
@@ -47,8 +48,12 @@ object PacketOrderManager {
 
 	fun onPacketSend(packet: Packet<*>): Boolean {
 		val protectedAction = isProtectedAction(packet)
-		if (protectedAction && packet !== flushingProtectedPacket && protectedPackets.shouldDelay(packet)) {
-			return true
+		if (protectedAction && packet !== flushingProtectedPacket) {
+			if (vanillaUseDepth > 0) {
+				protectedPackets.markUsed()
+			} else if (protectedPackets.shouldDelay(packet)) {
+				return true
+			}
 		}
 
 		if (isItemUse(packet)) {
@@ -70,9 +75,18 @@ object PacketOrderManager {
 	fun tryRunProtectedActionImmediately(action: () -> Unit): Boolean =
 		protectedPackets.tryRunImmediately(action)
 
+	fun beginVanillaUse() {
+		vanillaUseDepth++
+	}
+
+	fun endVanillaUse() {
+		vanillaUseDepth = (vanillaUseDepth - 1).coerceAtLeast(0)
+	}
+
 	fun clear() {
 		actions.clear()
 		protectedPackets.clear()
+		vanillaUseDepth = 0
 		flushingProtectedPacket = null
 		synchronized(receiveListeners) {
 			receiveListeners.clear()
@@ -131,6 +145,11 @@ internal class OneActionPerTickQueue<T> {
 		}
 		action()
 		return true
+	}
+
+	@Synchronized
+	fun markUsed() {
+		actionUsedThisTick = true
 	}
 
 	@Synchronized

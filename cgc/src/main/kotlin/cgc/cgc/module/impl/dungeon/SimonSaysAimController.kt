@@ -27,11 +27,13 @@ internal data class AimSettings(
 internal data class AimTimingProfile(
 	val minimumSpeed: Double = 0.35,
 	val maximumSpeed: Double = 2.25,
-	val maximumDurationMs: Long? = null
+	val maximumDurationMs: Long? = null,
+	val maximumAngularVelocity: Double = 540.0
 ) {
 	init {
 		require(minimumSpeed > 0.0 && maximumSpeed >= minimumSpeed)
 		require(maximumDurationMs == null || maximumDurationMs > 0L)
+		require(maximumAngularVelocity > 0.0)
 	}
 }
 
@@ -155,16 +157,16 @@ internal class SimonSaysAimController {
 					yawDelta,
 					pitchDelta,
 					angularDistance,
-					minOf(MAX_ANGULAR_SPEED, nominalVelocity * motion.startVelocityFactor)
+					minOf(timing.maximumAngularVelocity, nominalVelocity * motion.startVelocityFactor)
 				)
 			motion.stabilizeRetargetDirection -> projectTowardTarget(
 				previousMotion.velocity,
 				yawDelta,
 				pitchDelta,
 				angularDistance,
-				minOf(MAX_ANGULAR_SPEED, nominalVelocity * MAX_CARRIED_VELOCITY_FACTOR)
+				minOf(timing.maximumAngularVelocity, nominalVelocity * MAX_CARRIED_VELOCITY_FACTOR)
 			)
-			else -> clampMagnitude(previousMotion.velocity, MAX_ANGULAR_SPEED)
+			else -> clampMagnitude(previousMotion.velocity, timing.maximumAngularVelocity)
 		}
 		val initialAcceleration = when {
 			previousMotion == null -> ZERO_ROTATION
@@ -182,7 +184,7 @@ internal class SimonSaysAimController {
 				yawDelta,
 				pitchDelta,
 				angularDistance,
-				minOf(MAX_ANGULAR_SPEED, nominalVelocity * motion.passThroughVelocityFactor)
+				minOf(timing.maximumAngularVelocity, nominalVelocity * motion.passThroughVelocityFactor)
 			)
 		} else {
 			ZERO_ROTATION
@@ -350,7 +352,7 @@ internal class SimonSaysAimController {
 		val jitterStrength = 0.45 + settings.randomness * 0.55
 		val jitter = 1.0 + random.between(-0.025, 0.03) * jitterStrength
 		val requested = baseMs * modeScale * contextScale * jitter * motion.durationScale / settings.speed
-		val velocityFloor = distance * QUINTIC_PEAK_VELOCITY_FACTOR / MAX_ANGULAR_SPEED * 1000.0
+		val velocityFloor = distance * QUINTIC_PEAK_VELOCITY_FACTOR / timing.maximumAngularVelocity * 1000.0
 		val accelerationFloor = sqrt(distance * QUINTIC_PEAK_ACCELERATION_FACTOR / MAX_ANGULAR_ACCELERATION) * 1000.0
 		val minimum = max(modeMinimumMs(mode), max(velocityFloor, accelerationFloor))
 		val maximum = timing.maximumDurationMs ?: modeMaximumMs(mode)
@@ -516,7 +518,6 @@ internal class SimonSaysAimController {
 		private const val MAX_AIM_SPEED = 2.25
 		private const val BASE_DURATION_MS = 74.0
 		private const val MS_PER_DEGREE = 3.15
-		private const val MAX_ANGULAR_SPEED = 540.0
 		private const val MAX_ANGULAR_ACCELERATION = 14_000.0
 		private const val MAX_CARRIED_VELOCITY_FACTOR = 1.45
 		private const val QUINTIC_PEAK_VELOCITY_FACTOR = 1.875

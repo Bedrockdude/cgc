@@ -9,6 +9,28 @@ import kotlin.math.ceil
 object WaterboardRoutePlanner {
 	data class Walk(val target: Vec3)
 
+	fun nearbyEtherwarpSupports(preferred: BlockPos): List<BlockPos> = buildList {
+		for (yOffset in VERTICAL_SUPPORT_OFFSETS) {
+			for (xOffset in -1..1) for (zOffset in -1..1) {
+				if (xOffset == 0 && yOffset == 0 && zOffset == 0) continue
+				add(preferred.offset(xOffset, yOffset, zOffset))
+			}
+		}
+	}
+
+	fun etherwarpSupportCandidates(preferred: BlockPos, approach: Vec3, lever: BlockPos, reach: Double): List<BlockPos> {
+		val anchors = listOf(preferred, BlockPos.containing(approach).below(), lever.below())
+		val candidates = linkedSetOf<BlockPos>()
+		for (anchor in anchors) {
+			for (yOffset in -2..2) for (xOffset in -4..4) for (zOffset in -4..4) {
+				val support = anchor.offset(xOffset, yOffset, zOffset)
+				val feet = Vec3(support.x + 0.5, support.y + 1.0, support.z + 0.5)
+				if (feet.distanceToSqr(lever.center) <= reach * reach) candidates += support
+			}
+		}
+		return candidates.toList()
+	}
+
 	fun safeStraightWalk(level: ClientLevel, player: LocalPlayer, target: Vec3): Walk? {
 		val start = player.position()
 		val dx = target.x - start.x
@@ -32,6 +54,7 @@ object WaterboardRoutePlanner {
 	}
 
 	private val FOOTPRINT_OFFSETS = listOf(-0.22 to -0.22, -0.22 to 0.22, 0.22 to -0.22, 0.22 to 0.22)
+	private val VERTICAL_SUPPORT_OFFSETS = listOf(0, -1, 1)
 	private const val MAX_WALK_DISTANCE = 3.0
 	private const val MAX_Y_DELTA = 0.45
 	private const val SAMPLE_STEP = 0.20

@@ -7,6 +7,7 @@ import cgc.cgc.location.Floor
 import cgc.cgc.location.Island
 import cgc.cgc.location.Location
 import cgc.cgc.module.ActionBarMessageModule
+import cgc.cgc.module.BlockChangeModule
 import cgc.cgc.module.ChatMessageModule
 import cgc.cgc.module.CgcModule
 import cgc.cgc.module.ClientTickModule
@@ -25,6 +26,7 @@ import cgc.cgc.utils.ItemUtils
 import cgc.cgc.utils.SpiritLeapMenu
 import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
+import net.minecraft.core.BlockPos
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.game.ClientboundBundlePacket
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket
@@ -32,6 +34,8 @@ import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket
 import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket
 import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket
 import net.minecraft.world.entity.player.Player
+import net.minecraft.world.level.block.Blocks
+import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.phys.Vec3
 import java.util.concurrent.ThreadLocalRandom
 
@@ -41,7 +45,7 @@ class AutoLeap : CgcModule(
 	category = ModuleCategory.DUNGEONS,
 	description = "Automatically uses Spirit Leap for your selected F7/M7 class route.",
 	defaultEnabled = false
-), ClientTickModule, ChatMessageModule, ActionBarMessageModule, PacketReceiveModule, WorldLoadModule {
+), ClientTickModule, ChatMessageModule, ActionBarMessageModule, BlockChangeModule, PacketReceiveModule, WorldLoadModule {
 	private val dungeonClass = ModeSetting("Class", "Healer", CLASS_MODES)
 	private val i4LeapEnabled = BooleanSetting("I4 Leap Enabled", true)
 	private val i4LeapTarget = ModeSetting(
@@ -132,6 +136,7 @@ class AutoLeap : CgcModule(
 		modMessage("Leaping to $target.")
 	}
 	private val p3Progress = PhaseTrackerState()
+	private val i4BlockCompletion = I4BlockCompletionTracker()
 
 	private var pendingLeap: PendingLeap? = null
 	private var pendingUseTarget: String? = null
@@ -142,7 +147,8 @@ class AutoLeap : CgcModule(
 	private var lastTriggerAt = 0L
 	private var mageLastFarTick = NO_MAGE_FAR_TICK
 	private var mageWasInside = false
-	private var i4WindowUntil = 0L
+	private var i4TrackingActive = false
+	private var i4LeapTriggered = false
 	private var firstLightningHandled = false
 	private var firstLightningEndsAtTick = NO_LIGHTNING_END_TICK
 	private var firstCrushHandled = false
@@ -194,21 +200,40 @@ class AutoLeap : CgcModule(
 
 	override fun onClientTick(client: Minecraft) {
 		clientTicks++
-		if (!dungeonFloorCheck() || client.player == null || client.level == null) {
+		val player = client.player
+		if (!dungeonFloorCheck() || player == null || client.level == null) {
 			resetRuntime()
 			return
 		}
 
 		if (bossAreaCheck()) {
+			updateI4Tracking(player)
 			tickP3Progress()
 			detectHealerMageCp(client)
 			tickFirstLightning()
 		} else {
+			stopI4Tracking()
 			resetMageCpDetection()
 		}
 		runPending(client)
 		runPendingUse(client)
 		leapMenu.tickTimeout(MENU_TIMEOUT_MS)
+	}
+
+	override fun onBlockChange(pos: BlockPos, oldState: BlockState?, newState: BlockState) {
+		val player = Minecraft.getInstance().player ?: return
+		if (!ensureI4Tracking(player)) {
+			return
+		}
+
+		if (i4BlockCompletion.observeTransition(
+				pos,
+				oldState?.block == Blocks.EMERALD_BLOCK,
+				newState.block == Blocks.BLUE_TERRACOTTA
+			)
+		) {
+			completeI4()
+		}
 	}
 
 	override fun onChatMessage(message: String) {
@@ -279,9 +304,7 @@ class AutoLeap : CgcModule(
 		}
 
 		val text = AutoLeapSignals.normalize(message)
-		val now = System.currentTimeMillis()
 		when {
-			text == STORM_DEATH_MESSAGE -> i4WindowUntil = now + I4_WINDOW_MS
 			DungeonUtils.isPhase(Phase7.P2) && AutoLeapSignals.isStormCrush(text) && !firstCrushHandled -> {
 				firstCrushHandled = true
 				if (healCpEnabled.value) {
@@ -291,15 +314,8 @@ class AutoLeap : CgcModule(
 		}
 
 		val player = Minecraft.getInstance().player ?: return
-		if (now <= i4WindowUntil
-			&& DungeonState.p3Section == Phase7.S1
-			&& AutoLeapSignals.isOnI4(player.position())
-			&& AutoLeapSignals.isOwnDeviceCompletion(text, player.name.string)
-		) {
-			i4WindowUntil = 0L
-			if (i4LeapEnabled.value) {
-				queueLeap(DungeonClass.findClassString(i4LeapTarget.value), "I4", Phase7.S4)
-			}
+		if (ensureI4Tracking(player) && AutoLeapSignals.isOwnDeviceCompletion(text, player.name.string)) {
+			completeI4()
 		}
 	}
 
@@ -337,9 +353,53 @@ class AutoLeap : CgcModule(
 	private fun observeP3Packet(packet: Packet<*>) {
 		when (packet) {
 			is ClientboundBundlePacket -> packet.subPackets().forEach(::observeP3Packet)
-			is ClientboundSetSubtitleTextPacket -> Minecraft.getInstance().execute {
-				handleP3ProgressMessage(packet.text.string)
-			}
+			is ClientboundSetSubtitleTextPacket -> observeP3OverlayText(packet.text.string)
+			is ClientboundSetTitleTextPacket -> observeP3OverlayText(packet.text.string)
+		}
+	}
+
+	private fun observeP3OverlayText(message: String) {
+		Minecraft.getInstance().execute {
+			handleP3ProgressMessage(message)
+			handleAutoLeapMessage(message)
+		}
+	}
+
+	private fun updateI4Tracking(player: Player) {
+		if (!ensureI4Tracking(player)) {
+			stopI4Tracking()
+		}
+	}
+
+	private fun ensureI4Tracking(player: Player): Boolean {
+		if (!bossAreaCheck() || !DungeonUtils.isPhase(Phase7.P3) || !AutoLeapSignals.isOnI4(player.position())) {
+			return false
+		}
+
+		if (!i4TrackingActive) {
+			i4TrackingActive = true
+			i4LeapTriggered = false
+			i4BlockCompletion.reset()
+		}
+		return true
+	}
+
+	private fun stopI4Tracking() {
+		if (!i4TrackingActive) {
+			return
+		}
+		i4TrackingActive = false
+		i4LeapTriggered = false
+		i4BlockCompletion.reset()
+	}
+
+	private fun completeI4() {
+		if (i4LeapTriggered) {
+			return
+		}
+		i4LeapTriggered = true
+		if (i4LeapEnabled.value) {
+			queueLeap(DungeonClass.findClassString(i4LeapTarget.value), "I4", Phase7.S4)
 		}
 	}
 
@@ -575,7 +635,7 @@ class AutoLeap : CgcModule(
 		resetMageCpDetection()
 		p3Progress.reset()
 		leapMenu.clear()
-		i4WindowUntil = 0L
+		stopI4Tracking()
 		firstLightningHandled = false
 		firstLightningEndsAtTick = NO_LIGHTNING_END_TICK
 		firstCrushHandled = false
@@ -612,9 +672,7 @@ class AutoLeap : CgcModule(
 		private const val MAX_SLOT_SWITCH_SETTLE_TICKS = 3
 		private const val NO_MAGE_FAR_TICK = -1L
 		private const val NO_LIGHTNING_END_TICK = -1L
-		private const val I4_WINDOW_MS = 30_000L
 		private const val KEY_PICKUP_DUPLICATE_WINDOW_MS = 1_000L
-		private const val STORM_DEATH_MESSAGE = "[BOSS] Storm: I should have known that I stood no chance."
 		private const val MAGE_CP_AREA_RADIUS_SQ = 8.0 * 8.0
 		private const val MAGE_INSIDE_RADIUS_SQ = 2.5 * 2.5
 		private const val MAGE_FAR_DISTANCE_SQ = 6.0 * 6.0

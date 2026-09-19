@@ -14,6 +14,8 @@ interface AutoPuzzleController {
 
 	fun blockChanged(pos: BlockPos, oldState: BlockState?, newState: BlockState) {}
 
+	fun frame(client: Minecraft) {}
+
 	fun render(context: LevelRenderContext) {}
 
 	fun stop(reason: String, terminal: Boolean = true) {}

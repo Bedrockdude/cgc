@@ -120,6 +120,6 @@ class DNYapper : CgcModule(
 
 	private companion object {
 		private val PARTY_NAME: Pattern = Pattern.compile("^([A-Za-z0-9_]{1,16})'s Party$")
-		private const val DEFAULT_MESSAGES = "Hey, do you still need one? | Can I join? | Got room?"
+		private const val DEFAULT_MESSAGES = "Messages (Separate with | )"
 	}
 }

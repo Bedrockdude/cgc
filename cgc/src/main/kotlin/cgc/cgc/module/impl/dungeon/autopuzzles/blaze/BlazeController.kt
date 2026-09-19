@@ -1,6 +1,8 @@
 package cgc.cgc.module.impl.dungeon.autopuzzles.blaze
 
 import cgc.cgc.data.Colour
+import cgc.cgc.dungeon.DungeonPuzzle
+import cgc.cgc.dungeon.DungeonPuzzleState
 import cgc.cgc.module.impl.dungeon.autopuzzles.AutoPuzzleAimController
 import cgc.cgc.module.impl.dungeon.autopuzzles.AutoPuzzleAimProfile
 import cgc.cgc.module.impl.dungeon.autopuzzles.AutoPuzzleContext
@@ -15,6 +17,7 @@ import cgc.cgc.runtime.CgcRenderer3D
 import cgc.cgc.utils.ChatUtils
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.minecraft.client.Minecraft
+import net.minecraft.core.BlockPos
 import net.minecraft.world.phys.AABB
 import net.minecraft.world.phys.Vec3
 import java.util.concurrent.ThreadLocalRandom
@@ -43,14 +46,14 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 	private val aim = AutoPuzzleAimController()
 	private var shortbow: AutoPuzzleItems.Shortbow? = null
 	private var currentTargetId: Int? = null
+	private var preAimTargetId: Int? = null
 	private var aimedPoint: Vec3? = null
 	private var baselineIds = emptySet<Int>()
 	private var burstAttempt = 0
 	private var burstStarted = false
 	private var stateAtMs = 0L
 	private var nextActionAtMs = 0L
-	private var edgeStart = Vec3.ZERO
-	private var stableEdgeTicks = 0
+	private var centerAlignedTicks = 0
 	private var requiresStepOff = false
 	private var observedOffStart = false
 	private var lastOnStart = false
@@ -88,6 +91,18 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 		}
 		val observed = BlazeSolver.observe(context, reversed)
 		renderTargets = observed.map { RenderTarget(it.entity.id, it.entity.boundingBox, it.entity.boundingBox.center) }
+		when (context.puzzleState(DungeonPuzzle.BLAZE)) {
+			DungeonPuzzleState.GREEN -> {
+				cleanup()
+				state = State.DONE
+				return
+			}
+			DungeonPuzzleState.FAILED -> {
+				if (state !in setOf(State.WAITING, State.DONE)) stop("the dungeon puzzle was marked failed", terminal = true)
+				return
+			}
+			else -> Unit
+		}
 		val onStart = isOnStart(context, standingPoint)
 		lastOnStart = onStart
 		if (requiresStepOff) {
@@ -128,8 +143,9 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 			runSequence = context.runSequence
 			roomSignature = context.roomSignature
 			stateAtMs = context.nowMs
+			centerAlignedTicks = 0
 			val center = AutoPuzzleRoomCoordinates.worldPosition(context.room, 0.5, context.player.eyePosition.y, 0.5)
-			aim.start(context, center, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.NORMAL)
+			aim.start(context, center, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.BLAZE)
 			state = State.FACE_CENTER
 			return
 		}
@@ -142,10 +158,9 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 
 		when (state) {
 			State.FACE_CENTER -> {
-				if (aim.update(context).finished) {
+				if (aim.update(context).finished) centerAlignedTicks++ else centerAlignedTicks = 0
+				if (centerAlignedTicks >= REQUIRED_ALIGNMENT_TICKS) {
 					aim.clear()
-					edgeStart = context.player.position()
-					stableEdgeTicks = 0
 					lease?.press(context.client.options.keyShift)
 					lease?.press(context.client.options.keyUp)
 					stateAtMs = context.nowMs
@@ -164,18 +179,11 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 	}
 
 	private fun tickEdgeWalk(context: AutoPuzzleContext) {
-		val moved = horizontalDistanceSqr(edgeStart, context.player.position())
-		val velocity = context.player.deltaMovement
-		val speedSq = velocity.x * velocity.x + velocity.z * velocity.z
-		if (moved >= MIN_EDGE_MOVE_SQ && speedSq <= EDGE_STOP_SPEED_SQ) stableEdgeTicks++ else stableEdgeTicks = 0
-		if (stableEdgeTicks >= REQUIRED_STABLE_TICKS) {
+		if (BlazeMovementGate.edgeWalkFinished(context.nowMs - stateAtMs)) {
 			lease?.release(context.client.options.keyUp)
 			stateAtMs = context.nowMs
 			state = State.EDGE_STOP
 			return
-		}
-		if (context.nowMs - stateAtMs > EDGE_APPROACH_TIMEOUT_MS) {
-			stop("could not reach the safe shooting edge", terminal = true)
 		}
 	}
 
@@ -188,7 +196,6 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 			}
 			return
 		}
-		lease?.release(context.client.options.keyShift)
 		beginNextTarget(context, observed)
 	}
 
@@ -203,7 +210,7 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 			return
 		}
 		val target = observed.first().entity
-		val plan = ProjectileAimPlanner.entity(context, target, observed.drop(1).map { it.entity }, bow.terminator)
+		val plan = ProjectileAimPlanner.entity(context, target, observed.drop(1).map { it.entity }, bow.terminator, removedCenterPillar(context))
 		val point = (plan as? ProjectileAimPlanner.Result.Safe)?.point ?: run {
 			stop((plan as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
 			return
@@ -213,7 +220,7 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 		burstAttempt = 1
 		burstStarted = false
 		aimedPoint = point
-		aim.start(context, point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.CHAINED)
+		aim.start(context, point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.BLAZE)
 		state = State.AIM_TARGET
 		stateAtMs = context.nowMs
 	}
@@ -225,18 +232,29 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 		if (!AutoPuzzleItems.isShortbow(context.player.inventory.selectedItem)) {
 			return stop("the selected hotbar item is no longer a shortbow", terminal = true)
 		}
-		val plan = ProjectileAimPlanner.entity(context, target, observed.filter { it.entity.id != targetId }.map { it.entity }, bow.terminator)
-		val safe = plan as? ProjectileAimPlanner.Result.Safe
-			?: return stop((plan as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
-		if (aimedPoint?.distanceToSqr(safe.point)?.let { it > RETARGET_DISTANCE_SQ } == true) {
+		val unintended = observed.filter { it.entity.id != targetId }.map { it.entity }
+		val currentPoint = aimedPoint
+		if (currentPoint == null || !ProjectileAimPlanner.isSafeEntityAimPoint(
+				context,
+				currentPoint,
+				target,
+				unintended,
+				bow.terminator,
+				removedCenterPillar(context)
+			)
+		) {
+			val plan = ProjectileAimPlanner.entity(context, target, unintended, bow.terminator, removedCenterPillar(context))
+			val safe = plan as? ProjectileAimPlanner.Result.Safe
+				?: return stop((plan as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
 			aimedPoint = safe.point
-			aim.start(context, safe.point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.CHAINED)
+			aim.start(context, safe.point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.BLAZE)
 		}
 		val ready = aim.update(context).ready && ProjectileAimPlanner.liveRayHitsEntity(
 			context,
 			target,
 			observed.filter { it.entity.id != targetId }.map { it.entity },
-			bow.terminator
+			bow.terminator,
+			removedCenterPillar(context)
 		)
 		if (!ready) {
 			if (context.nowMs - stateAtMs >= AIM_ACQUISITION_TIMEOUT_MS) {
@@ -256,13 +274,14 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 		val targetId = currentTargetId ?: return stop("lost the current Blaze target", terminal = true)
 		val target = observed.firstOrNull { it.entity.id == targetId }?.entity ?: return handleTargetRemoved(context, observed)
 		val bow = shortbow ?: return stop("the selected shortbow is unavailable", terminal = true)
-		val plan = ProjectileAimPlanner.entity(context, target, observed.filter { it.entity.id != targetId }.map { it.entity }, bow.terminator)
+		val plan = ProjectileAimPlanner.entity(context, target, observed.filter { it.entity.id != targetId }.map { it.entity }, bow.terminator, removedCenterPillar(context))
 		if (plan !is ProjectileAimPlanner.Result.Safe) return stop((plan as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
 		if (!ProjectileAimPlanner.liveRayHitsEntity(
 				context,
 				target,
 				observed.filter { it.entity.id != targetId }.map { it.entity },
-				bow.terminator
+				bow.terminator,
+				removedCenterPillar(context)
 			)
 		) {
 			return stop("the live ray became unsafe before the second shortbow shot", terminal = true)
@@ -276,23 +295,48 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 
 	private fun tickRemoval(context: AutoPuzzleContext, observed: List<BlazeSolver.Target>) {
 		if (currentTargetId !in observed.map { it.entity.id }) return handleTargetRemoved(context, observed)
-		if (context.nowMs - stateAtMs < settings.blazeRemovalWait.value.toLong()) return
+		val elapsed = context.nowMs - stateAtMs
+		if (BlazeRemovalGate.shouldBeginPreAim(elapsed, settings.blazeRemovalWait.value.toLong())) {
+			updateNextTargetPreAim(context, observed)
+		}
+		if (!BlazeRemovalGate.shouldRetry(elapsed)) return
 		if (burstAttempt >= 2) {
 			stop("the Blaze survived both shot bursts", terminal = true)
 			return
 		}
 		burstAttempt++
+		preAimTargetId = null
 		val targetId = currentTargetId ?: return stop("lost the current Blaze target", terminal = true)
 		val target = observed.firstOrNull { it.entity.id == targetId }?.entity
 			?: return handleTargetRemoved(context, observed)
 		val bow = shortbow ?: return stop("the selected shortbow is unavailable", terminal = true)
-		val plan = ProjectileAimPlanner.entity(context, target, observed.filter { it.entity.id != targetId }.map { it.entity }, bow.terminator)
+		val plan = ProjectileAimPlanner.entity(context, target, observed.filter { it.entity.id != targetId }.map { it.entity }, bow.terminator, removedCenterPillar(context))
 		val point = (plan as? ProjectileAimPlanner.Result.Safe)?.point
 			?: return stop((plan as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
 		aimedPoint = point
-		aim.start(context, point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.CHAINED)
+		aim.start(context, point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.BLAZE)
 		state = State.AIM_TARGET
 		stateAtMs = context.nowMs
+	}
+
+	private fun updateNextTargetPreAim(context: AutoPuzzleContext, observed: List<BlazeSolver.Target>) {
+		val current = currentTargetId ?: return
+		val next = observed.firstOrNull { it.entity.id != current }?.entity ?: return
+		val bow = shortbow ?: return
+		val unintended = observed.filter { it.entity.id != next.id }.map { it.entity }
+		val existingPoint = aimedPoint
+		if (preAimTargetId == next.id && existingPoint != null && ProjectileAimPlanner.isSafeEntityAimPoint(
+				context, existingPoint, next, unintended, bow.terminator, removedCenterPillar(context)
+			)
+		) {
+			aim.update(context)
+			return
+		}
+		val plan = ProjectileAimPlanner.entity(context, next, unintended, bow.terminator, removedCenterPillar(context))
+		val point = (plan as? ProjectileAimPlanner.Result.Safe)?.point ?: return
+		preAimTargetId = next.id
+		aimedPoint = point
+		aim.start(context, point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.BLAZE)
 	}
 
 	private fun handleTargetRemoved(context: AutoPuzzleContext, observed: List<BlazeSolver.Target>) {
@@ -307,7 +351,19 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 			stop("a different Blaze died before the intended target", terminal = true)
 			return
 		}
+		val preparedId = preAimTargetId
+		val prepared = observed.firstOrNull { it.entity.id == preparedId }
 		currentTargetId = null
+		preAimTargetId = null
+		if (prepared != null && observed.firstOrNull()?.entity?.id == prepared.entity.id) {
+			currentTargetId = prepared.entity.id
+			baselineIds = observed.mapTo(linkedSetOf()) { it.entity.id }
+			burstAttempt = 1
+			burstStarted = false
+			state = State.AIM_TARGET
+			stateAtMs = context.nowMs
+			return
+		}
 		beginNextTarget(context, observed)
 	}
 
@@ -316,6 +372,13 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 		val current = currentTargetId ?: return null
 		val removed = baselineIds - observed.mapTo(hashSetOf()) { it.entity.id }
 		return if (removed.any { it != current }) "a different Blaze died before the intended target" else null
+	}
+
+	private fun removedCenterPillar(context: AutoPuzzleContext): (BlockPos) -> Boolean = { world ->
+		// The current Blaze room permits arrows through its former center column.
+		// Keep every other live block and entity collision in the safety check.
+		val local = AutoPuzzleRoomCoordinates.relativeBlock(context.room, world)
+		local.x == 0 && local.z == 0 && local.y in LEGACY_CENTER_PILLAR_Y
 	}
 
 	override fun render(context: LevelRenderContext) {
@@ -332,6 +395,8 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 			CgcRenderer3D.lineList(listOf(targets[1].center, targets[2].center), settings.secondLineColor.value, settings.secondLineColor.value, depth = false, width = width)
 		}
 	}
+
+	override fun frame(client: Minecraft) = aim.frameUpdate(client)
 
 	private fun targetColour(index: Int): Colour = when (index) {
 		0 -> settings.firstBlazeColor.value
@@ -401,6 +466,7 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 		inputSession = null
 		shortbow = null
 		currentTargetId = null
+		preAimTargetId = null
 		aimedPoint = null
 		baselineIds = emptySet()
 		burstAttempt = 0
@@ -410,12 +476,21 @@ class BlazeController(private val settings: BlazeSubModule) : AutoPuzzleControll
 	private companion object {
 		const val START_DISTANCE_SQ = 0.18
 		const val START_Y_TOLERANCE = 0.20
-		const val MIN_EDGE_MOVE_SQ = 0.04
 		const val EDGE_STOP_SPEED_SQ = 0.0004
-		const val REQUIRED_STABLE_TICKS = 3
-		const val EDGE_APPROACH_TIMEOUT_MS = 2_000L
+		const val REQUIRED_ALIGNMENT_TICKS = 2
 		const val EDGE_SETTLE_TIMEOUT_MS = 1_200L
 		const val AIM_ACQUISITION_TIMEOUT_MS = 2_000L
-		const val RETARGET_DISTANCE_SQ = 0.0025
+		val LEGACY_CENTER_PILLAR_Y = 20..125
 	}
+}
+
+internal object BlazeMovementGate {
+	fun edgeWalkFinished(elapsedMs: Long): Boolean = elapsedMs >= 150L
+}
+
+internal object BlazeRemovalGate {
+	fun shouldBeginPreAim(elapsedMs: Long, configuredWaitMs: Long): Boolean = elapsedMs >= configuredWaitMs
+	fun shouldRetry(elapsedMs: Long): Boolean = elapsedMs >= KILL_CONFIRM_TIMEOUT_MS
+
+	private const val KILL_CONFIRM_TIMEOUT_MS = 2_500L
 }

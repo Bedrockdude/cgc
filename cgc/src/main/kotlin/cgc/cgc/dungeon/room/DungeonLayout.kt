@@ -44,3 +44,13 @@ data class ScannedDungeonLayout(
 		val EMPTY = ScannedDungeonLayout(0L, emptyList(), emptyList(), emptyList(), emptyList())
 	}
 }
+
+internal fun mergeRetainedRooms(
+	previous: Map<Pair<Int, Int>, ScannedDungeonRoom>,
+	scanned: Map<Pair<Int, Int>, ScannedDungeonRoom>
+): Map<Pair<Int, Int>, ScannedDungeonRoom> {
+	val replacements = scanned.mapNotNull { (center, room) ->
+		previous[center]?.signature?.let { previousSignature -> previousSignature to room }
+	}.toMap()
+	return previous.mapValues { (_, room) -> replacements[room.signature] ?: room } + scanned
+}

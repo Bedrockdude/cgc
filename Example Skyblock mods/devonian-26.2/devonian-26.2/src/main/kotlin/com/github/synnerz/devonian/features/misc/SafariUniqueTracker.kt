@@ -1,0 +1,190 @@
+package com.github.synnerz.devonian.features.misc
+
+import com.github.synnerz.devonian.api.ChatUtils
+import com.github.synnerz.devonian.api.events.ChatEvent
+import com.github.synnerz.devonian.api.events.ClientThreadServerTickEvent
+import com.github.synnerz.devonian.api.events.RenderOverlayEvent
+import com.github.synnerz.devonian.api.events.WorldChangeEvent
+import com.github.synnerz.devonian.config.Categories
+import com.github.synnerz.devonian.hud.texthud.TextHudFeature
+
+object SafariUniqueTracker : TextHudFeature(
+    "safariUniqueTracker",
+    "Tracks the uniques",
+    Categories.MISC,
+    subcategory = "General",
+    area = "safari",
+) {
+    private val SETTING_SEND_BIOME_DONE_MSG = addSwitch(
+        "biomeDoneMsg",
+        true,
+        "Sends a message in party chat whenever a biome is fully done",
+        "Biome Done Message"
+    )
+    private val SETTING_SEND_EACH_BIOME_MSG = addSwitch(
+        "biomePerDoneMsg",
+        false,
+        "Sends a message in party chat for each other biome that is fully done",
+        "Per Biome Done Message"
+    )
+    private val captureRegex = "^CAPTURE! You (?:caught|found) (?:an?|the) ([\\w ]+),? and (?:as a reward|gained)? a?n? ?(?:it gave you a )?(?:\\d+x )?([\\w ]+) Shard!$".toRegex()
+    private val teamCaptureRegex = "^LOOT SHARE! You received a?n? ?(?:\\d+x )?([\\w ]+) Shard from (\\w{1,16}) (?:catching|finding) (?:an?|the) ([\\w ]+)!$".toRegex()
+    private val teamCount = mutableMapOf<String, PlayerData>()
+    private val biomesDone = mutableSetOf<BiomeType>()
+    private var captures = PlayerData(BiomeType.NONE)
+    private var messageSent = false
+
+    enum class BiomeType(val biomeName: String, val biomeFormat: String, val mobTypes: Set<String>) {
+        CAVERN(
+            "cavern",
+            "&6Cavern",
+            setOf(
+                "Cavernfish",
+                "Flitter",
+                "Shyworm",
+                "Driftling",
+                "Chuckwalla",
+                "Rockmite",
+                "Scrappy",
+                "Snoozle",
+                "Gemzie",
+            )
+        ),
+        FOREST(
+            "forest",
+            "&2Forest",
+            setOf(
+                "Foxtrot",
+                "Bluebird",
+                "Honeybug",
+                "Treefrog",
+                "Woodchucker",
+                "Fluffling",
+                "Hideonfloor",
+                "Parakeet",
+                "Macaw",
+            )
+        ),
+        HAUNTED(
+            "haunted",
+            "&5Haunted",
+            setOf(
+                "Areita",
+                "Bloodbat",
+                "Duplico",
+                "Gazer",
+                "Litterbug",
+                "Solsnatcher",
+                "Gimmiegold",
+                "Hideonwall",
+                "Hideyho",
+                "Doomspiral",
+            )
+        ),
+        ICY(
+            "icy",
+            "&9Icy",
+            setOf(
+                "Strongarm",
+                "Tepid",
+                "Polaris",
+                "Shuddersquid",
+                "Billygoat",
+                "Mantis Shrimp",
+                "Nozzlenose",
+                "Troodon",
+                "Wumpa",
+            )
+        ),
+        NONE("", "", setOf());
+
+        companion object {
+            fun fromMobType(mobType: String): BiomeType? {
+                return entries.find { it.mobTypes.contains(mobType) }
+            }
+        }
+    }
+
+    data class PlayerData(
+        var biome: BiomeType,
+        val captures: MutableSet<String> = mutableSetOf(),
+        var isMax: Boolean = false,
+    ) {
+        fun add(mobType: String) {
+            captures.add(mobType)
+        }
+    }
+
+    override fun initialize() {
+        on<ChatEvent> { event ->
+            event.matches(teamCaptureRegex)?.let {
+                val mobType = it.getOrNull(0) ?: return@on
+                val playerName = it.getOrNull(1) ?: return@on
+                val biome = BiomeType.fromMobType(mobType) ?: return@on
+                if (teamCount.any { it.value.captures.contains(mobType) }) return@on
+
+                teamCount.getOrPut(playerName) { PlayerData(biome) }.add(mobType)
+            }
+            val ( mobType, shardType ) = event.matches(captureRegex) ?: return@on
+            val biome = BiomeType.fromMobType(mobType) ?: return@on
+            if (captures.biome == BiomeType.NONE)
+                captures.biome = biome
+            if (teamCount.any { it.value.captures.contains(mobType) }) return@on
+
+            captures.add(mobType)
+        }
+
+        on<ClientThreadServerTickEvent> {
+            if (captures.biome == BiomeType.NONE) return@on
+            val biome = captures.biome
+            val missing = biome.mobTypes - captures.captures
+            if (SETTING_SEND_BIOME_DONE_MSG.get() && !messageSent && missing.isEmpty()) {
+                ChatUtils.command("pc ${biome.biomeName} done")
+                messageSent = true
+                if (SETTING_SEND_EACH_BIOME_MSG.get())
+                    biomesDone.add(biome)
+            }
+
+            setLines(buildList {
+                add("&e[${biome.biomeFormat}&e] ${if (missing.isEmpty()) "&a" else "&c"}${captures.captures.size}&f/&a${biome.mobTypes.size}")
+
+                if (missing.isNotEmpty()) {
+                    missing.forEach { add("&7- &c$it") }
+                    add("")
+                }
+
+                teamCount.forEach { (playerName, data) ->
+                    val missing = data.biome.mobTypes - data.captures
+                    if (missing.isEmpty() && SETTING_SEND_EACH_BIOME_MSG.get() && !biomesDone.contains(data.biome)) {
+                        biomesDone.add(data.biome)
+                        ChatUtils.command("pc ${data.biome.biomeName} done")
+                    }
+                    add("&b$playerName &e[${data.biome.biomeFormat}&e]&f: ${if (missing.isEmpty()) "&a" else "&c"}${data.captures.size}&f/&a${data.biome.mobTypes.size}")
+                    if (missing.size > 3) return@forEach
+
+                    missing.forEach { ms -> add("&7- &c$ms") }
+                }
+            })
+        }
+
+        on<RenderOverlayEvent> {
+            draw(it.ctx)
+        }
+    }
+
+    override fun getEditText(): List<String> = listOf(
+        "&e[&6Cavern&e] &c2&f/&69",
+        "&7- &cCavernfish",
+        "&7- &cFlitter",
+        "",
+        "&b${minecraft.player?.name?.string ?: ""} &e[&2Forest&e]&f: &c2&f/&69",
+    )
+
+    override fun onWorldChange(event: WorldChangeEvent) {
+        teamCount.clear()
+        captures = PlayerData(BiomeType.NONE)
+        messageSent = false
+        biomesDone.clear()
+        clearLines()
+    }
+}

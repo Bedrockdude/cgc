@@ -20,6 +20,7 @@ import cgc.cgc.module.setting.SaveSetting
 import cgc.cgc.module.setting.Setting
 import cgc.cgc.module.setting.SoundSetting
 import cgc.cgc.module.setting.StringSetting
+import cgc.cgc.module.setting.WardrobeLoadoutListSetting
 import cgc.cgc.module.setting.group.GroupSetting
 import com.mojang.blaze3d.platform.InputConstants
 import net.minecraft.client.Minecraft
@@ -113,10 +114,13 @@ private class RsmStylePanel {
 	private var leftScroll = 0.0
 	private var writingSearch = false
 	private var focusedString: StringSetting? = null
+	private var focusedNumber: FocusedNumber? = null
 	private var focusedPlayerAlias: FocusedPlayerAlias? = null
+	private var focusedWardrobeLoadout: FocusedWardrobeLoadout? = null
 	private var focusedSave: SaveSetting<*>? = null
 	private var waitingKeybind: KeybindSetting? = null
 	private var waitingHotbarSwapKey: WaitingHotbarSwapKey? = null
+	private var waitingWardrobeKey: WaitingWardrobeKey? = null
 	private var draggingNumber: NumberSetting? = null
 	private var draggingColour: ColourDrag? = null
 	private var expandedSettingKey: String? = null
@@ -156,6 +160,10 @@ private class RsmStylePanel {
 	}
 
 	fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
+		focusedNumber?.let { focused ->
+			if (!focused.bounds.contains(mouseX, mouseY)) commitFocusedNumber()
+		}
+
 		waitingKeybind?.let { setting ->
 			if (button != 0) {
 				setting.value.keyName = InputConstants.Type.MOUSE.getOrCreate(button).name
@@ -172,6 +180,14 @@ private class RsmStylePanel {
 				return true
 			}
 		}
+		waitingWardrobeKey?.let { waiting ->
+			if (button != 0) {
+				waiting.loadout.keybind.keyName = InputConstants.Type.MOUSE.getOrCreate(button).name
+				waiting.setting.onEdit()
+				waitingWardrobeKey = null
+				return true
+			}
+		}
 
 		for (hitbox in hitboxes.asReversed()) {
 			if (hitbox.contains(mouseX, mouseY)) {
@@ -182,9 +198,12 @@ private class RsmStylePanel {
 
 		writingSearch = false
 		focusedString = null
+		focusedNumber = null
 		focusedPlayerAlias = null
+		focusedWardrobeLoadout = null
 		focusedSave = null
 		waitingHotbarSwapKey = null
+		waitingWardrobeKey = null
 		if (button == 0) expandedSettingKey = null
 		return false
 	}
@@ -243,6 +262,18 @@ private class RsmStylePanel {
 			return true
 		}
 
+		focusedNumber?.let { focused ->
+			if (typedChar.isDigit() || typedChar == '.' || typedChar == '-') {
+				val next = if (focused.selectAll) typedChar.toString() else focused.text + typedChar
+				if (isValidNumberInput(next, focused.setting)) {
+					focused.text = next.take(NUMBER_INPUT_MAX_LENGTH)
+					focused.selectAll = false
+					applyFocusedNumber(focused)
+				}
+			}
+			return true
+		}
+
 		focusedPlayerAlias?.let { focused ->
 			if (!typedChar.isISOControl()) {
 				focused.setting.setField(
@@ -250,6 +281,13 @@ private class RsmStylePanel {
 					focused.field,
 					focused.setting.fieldValue(focused.entry, focused.field) + typedChar
 				)
+			}
+			return true
+		}
+
+		focusedWardrobeLoadout?.let { focused ->
+			if (!typedChar.isISOControl()) {
+				focused.setting.setName(focused.loadout, focused.loadout.name + typedChar)
 			}
 			return true
 		}
@@ -285,6 +323,17 @@ private class RsmStylePanel {
 			waitingHotbarSwapKey = null
 			return true
 		}
+		waitingWardrobeKey?.let { waiting ->
+			val key = InputConstants.getKey(input)
+			waiting.loadout.keybind.keyName = if (key.value == 0 || key.value == InputConstants.KEY_ESCAPE) {
+				InputConstants.UNKNOWN.name
+			} else {
+				key.name
+			}
+			waiting.setting.onEdit()
+			waitingWardrobeKey = null
+			return true
+		}
 
 		if (writingSearch) {
 			return handleTextKey(input, search, allowBlank = true) { search = it }
@@ -294,9 +343,42 @@ private class RsmStylePanel {
 			return handleTextKey(input, setting.value, allowBlank = setting.allowBlank) { setting.setText(it) }
 		}
 
+		focusedNumber?.let { focused ->
+			return when (input.key()) {
+				GLFW.GLFW_KEY_ESCAPE -> {
+					focused.setting.setValue(focused.originalValue)
+					focusedNumber = null
+					true
+				}
+				GLFW.GLFW_KEY_ENTER, GLFW.GLFW_KEY_KP_ENTER -> {
+					commitFocusedNumber()
+					true
+				}
+				GLFW.GLFW_KEY_BACKSPACE, GLFW.GLFW_KEY_DELETE -> {
+					focused.text = if (focused.selectAll) "" else focused.text.dropLast(1)
+					focused.selectAll = false
+					applyFocusedNumber(focused)
+					true
+				}
+				GLFW.GLFW_KEY_A -> {
+					if (input.modifiers() and GLFW.GLFW_MOD_CONTROL != 0) {
+						focused.selectAll = true
+						true
+					} else false
+				}
+				else -> false
+			}
+		}
+
 		focusedPlayerAlias?.let { focused ->
 			return handleTextKey(input, focused.setting.fieldValue(focused.entry, focused.field), allowBlank = true) {
 				focused.setting.setField(focused.entry, focused.field, it)
+			}
+		}
+
+		focusedWardrobeLoadout?.let { focused ->
+			return handleTextKey(input, focused.loadout.name, allowBlank = true) {
+				focused.setting.setName(focused.loadout, it)
 			}
 		}
 
@@ -587,7 +669,10 @@ private class RsmStylePanel {
 		for (group in module.getShownSettings()) {
 			val key = "${module.id}:${group.name}"
 			val selected = selectedGroup == group
-			val tabWidth = font.width(group.name) + 12
+			val showsState = group.toggleable && !group.name.equals("General", ignoreCase = true)
+			val stateText = if (group.value.enabled) "ON" else "OFF"
+			val stateWidth = if (showsState) font.width(stateText) + 10 else 0
+			val tabWidth = font.width(group.name) + 12 + if (showsState) stateWidth + 5 else 0
 			val hovered = Bounds(cursorX - 5, y + 68, tabWidth, 27).contains(mouseX.toDouble(), mouseY.toDouble())
 			val enabled = !group.toggleable || group.name.equals("General", ignoreCase = true) || group.value.enabled
 			val hoverValue = animate(groupHover, key, if (hovered || selected) 1.0f else 0.0f)
@@ -595,6 +680,12 @@ private class RsmStylePanel {
 
 			if (hovered) fill(gfx, cursorX - 5, y + 68, cursorX + tabWidth, y + 94, Colours.SELECTED_BACKGROUND)
 			gfx.text(font, group.name, cursorX, tabY, blend(if (enabled) Colours.ENABLED_TEXT else Colours.UNSELECTED_TEXT, Colours.SELECTED_TEXT, hoverValue), false)
+			if (showsState) {
+				val stateX = cursorX + font.width(group.name) + 6
+				val stateColour = if (enabled) Colours.STATE_ON else Colours.STATE_OFF
+				fill(gfx, stateX, tabY - 3, stateX + stateWidth, tabY + 10, stateColour)
+				gfx.centeredText(font, stateText, stateX + stateWidth / 2, tabY, Colours.TEXT)
+			}
 			val underline = (font.width(group.name) * selectValue).roundToInt()
 			if (underline > 0) fill(gfx, cursorX, y + 91, cursorX + underline, y + 93, Colours.SELECTED)
 
@@ -610,7 +701,7 @@ private class RsmStylePanel {
 				}
 			})
 
-			cursorX += font.width(group.name) + 15
+			cursorX += tabWidth + 3
 		}
 	}
 
@@ -640,7 +731,7 @@ private class RsmStylePanel {
 		if (group.description.isNotBlank()) {
 			gfx.text(font(), fit(font(), group.description, width), startX, y + 108, Colours.UNSELECTED_TEXT, false)
 		}
-		if (rows.any { it is HotbarSwapListSetting || it is PlayerNameAliasListSetting }) {
+		if (rows.any { it is HotbarSwapListSetting || it is PlayerNameAliasListSetting || it is WardrobeLoadoutListSetting }) {
 			renderVariableGroupSettings(gfx, module, group, rows, scrollKey, startX, startY, width, height, mouseX, mouseY)
 			return
 		}
@@ -731,6 +822,10 @@ private class RsmStylePanel {
 		}
 		if (setting is PlayerNameAliasListSetting) {
 			renderPlayerNameAliases(gfx, row, setting)
+			return
+		}
+		if (setting is WardrobeLoadoutListSetting) {
+			renderWardrobeLoadouts(gfx, row, setting, mouseX, mouseY)
 			return
 		}
 
@@ -845,8 +940,12 @@ private class RsmStylePanel {
 		for ((option, state) in setting.value) {
 			val hovered = Bounds(boxX, optionY, 200, 18).contains(mouseX.toDouble(), mouseY.toDouble())
 			fill(gfx, boxX, optionY, boxX + 200, optionY + 18, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
-			gfx.text(font(), fit(font(), option, 174), boxX + 5, optionY + 5, if (state) Colours.SELECTED else Colours.TEXT, false)
-			if (state) fill(gfx, boxX + 186, optionY + 6, boxX + 192, optionY + 12, Colours.SELECTED)
+			gfx.text(font(), fit(font(), option, 158), boxX + 5, optionY + 5, if (state) Colours.SELECTED_TEXT else Colours.UNSELECTED_TEXT, false)
+			val stateText = if (state) "ON" else "OFF"
+			val stateWidth = font().width(stateText) + 10
+			val stateX = boxX + 194 - stateWidth
+			fill(gfx, stateX, optionY + 3, stateX + stateWidth, optionY + 15, if (state) Colours.STATE_ON else Colours.STATE_OFF)
+			gfx.centeredText(font(), stateText, stateX + stateWidth / 2, optionY + 5, Colours.TEXT)
 			hitboxes.add(Hitbox(boxX, optionY, 200, 18) { button ->
 				if (button == 0) setting.toggle(option)
 			})
@@ -871,14 +970,21 @@ private class RsmStylePanel {
 		fill(gfx, sliderX, sliderY, sliderX + 140, sliderY + 16, Colours.PANEL)
 		fill(gfx, sliderX + 2, sliderY + 2, sliderX + 2 + fillWidth, sliderY + 14, Colours.SELECTED)
 		gfx.centeredText(font(), setting.displayValue, sliderX + 70, sliderY + 4, Colours.TEXT)
-		drawInputBox(gfx, inputX, sliderY, 50, 16, false)
-		gfx.centeredText(font(), fit(font(), setting.valueAsString(), 42), inputX + 25, sliderY + 4, Colours.TEXT)
+		val focused = focusedNumber?.takeIf { it.setting == setting }
+		val inputBounds = Bounds(inputX, sliderY, 50, 16)
+		focused?.bounds = inputBounds
+		drawInputBox(gfx, inputX, sliderY, 50, 16, focused != null)
+		val inputText = focused?.text ?: setting.valueAsString()
+		gfx.centeredText(font(), fit(font(), inputText + if (focused != null && !focused.selectAll) "|" else "", 42), inputX + 25, sliderY + 4, Colours.TEXT)
 
 		hitboxes.add(Hitbox(sliderX, sliderY, 140, 16) { button ->
 			if (button == 0) {
 				draggingNumber = setting
 				updateNumber(setting, mouseX, sliderX, 140)
 			}
+		})
+		hitboxes.add(Hitbox(inputX, sliderY, 50, 16) { button ->
+			if (button == 0) focusNumber(setting, inputBounds)
 		})
 	}
 
@@ -942,6 +1048,36 @@ private class RsmStylePanel {
 		hitboxes.add(Hitbox(boxX, boxY, 200, 21) { button ->
 			if (button == 0) setting.press()
 		})
+	}
+
+	private fun focusNumber(setting: NumberSetting, bounds: Bounds) {
+		if (focusedNumber?.setting != setting) commitFocusedNumber()
+		focusedNumber = FocusedNumber(setting, setting.valueAsString(), setting.value.toDouble(), bounds, selectAll = true)
+		focusedString = null
+		focusedPlayerAlias = null
+		focusedWardrobeLoadout = null
+		focusedSave = null
+		writingSearch = false
+	}
+
+	private fun applyFocusedNumber(focused: FocusedNumber) {
+		focused.text.toDoubleOrNull()?.takeIf(Double::isFinite)?.let(focused.setting::setValue)
+	}
+
+	private fun commitFocusedNumber() {
+		val focused = focusedNumber ?: return
+		val value = focused.text.toDoubleOrNull()?.takeIf(Double::isFinite)
+		if (value == null) focused.setting.setValue(focused.originalValue) else focused.setting.setValue(value)
+		focusedNumber = null
+	}
+
+	private fun isValidNumberInput(text: String, setting: NumberSetting): Boolean {
+		if (text.length > NUMBER_INPUT_MAX_LENGTH) return false
+		if (text.isEmpty()) return true
+		if (text == "-" || text == "." || text == "-.") return text != "-" && text != "-." || setting.min.signum() < 0
+		if (text.count { it == '.' } > 1 || text.drop(1).contains('-')) return false
+		if (text.startsWith('-') && setting.min.signum() >= 0) return false
+		return text.toDoubleOrNull()?.isFinite() == true
 	}
 
 	private fun renderHotbarSwaps(gfx: GuiGraphicsExtractor, row: SettingRow, setting: HotbarSwapListSetting, mouseX: Int, mouseY: Int) {
@@ -1107,6 +1243,93 @@ private class RsmStylePanel {
 				writingSearch = false
 			}
 		})
+	}
+
+	private fun renderWardrobeLoadouts(
+		gfx: GuiGraphicsExtractor,
+		row: SettingRow,
+		setting: WardrobeLoadoutListSetting,
+		mouseX: Int,
+		mouseY: Int
+	) {
+		gfx.text(font(), fit(font(), setting.name, 110), row.x, row.y, Colours.TEXT, false)
+		if (setting.value.isEmpty()) {
+			gfx.text(font(), "No loadouts added", row.x + CONTROL_X, row.y, Colours.UNSELECTED_TEXT, false)
+			return
+		}
+
+		var y = row.y + 18
+		val boxWidth = min(row.width, WARDROBE_LOADOUT_BOX_WIDTH)
+		for (loadout in setting.value) {
+			fill(gfx, row.x, y, row.x + boxWidth, y + WARDROBE_LOADOUT_BOX_HEIGHT, Colours.PANEL)
+			drawRectOutline(gfx, row.x, y, boxWidth, WARDROBE_LOADOUT_BOX_HEIGHT, Colours.GROUP_OUTLINE)
+
+			val fieldY = y + 18
+			val nameX = row.x + 8
+			val nameWidth = 202
+			gfx.text(font(), "Wardrobe slot name", nameX, y + 5, Colours.UNSELECTED_TEXT, false)
+			val nameFocused = focusedWardrobeLoadout?.loadout?.id == loadout.id
+			drawInputBox(gfx, nameX, fieldY, nameWidth, 19, nameFocused)
+			val shownName = if (loadout.name.isBlank() && !nameFocused) "e.g. Archer" else loadout.name + if (nameFocused) "|" else ""
+			gfx.text(font(), fit(font(), shownName, nameWidth - 10), nameX + 5, fieldY + 6, if (loadout.name.isBlank() && !nameFocused) Colours.UNSELECTED_TEXT else Colours.TEXT, false)
+			hitboxes.add(Hitbox(nameX, fieldY, nameWidth, 19) { button ->
+				if (button == 0) {
+					focusedWardrobeLoadout = FocusedWardrobeLoadout(setting, loadout)
+					focusedString = null
+					focusedPlayerAlias = null
+					focusedSave = null
+					waitingKeybind = null
+					waitingHotbarSwapKey = null
+					waitingWardrobeKey = null
+					writingSearch = false
+				}
+			})
+
+			val keyX = nameX + nameWidth + 8
+			val waiting = waitingWardrobeKey?.loadout?.id == loadout.id
+			drawInputBox(gfx, keyX, fieldY, 104, 19, waiting)
+			val keyText = if (waiting) "..." else "Key: ${WardrobeLoadoutListSetting.friendlyKeyName(loadout.keybind.keyName)}"
+			gfx.text(font(), fit(font(), keyText, 94), keyX + 5, fieldY + 6, Colours.TEXT, false)
+			hitboxes.add(Hitbox(keyX, fieldY, 104, 19) { button ->
+				if (button == 0) {
+					waitingWardrobeKey = WaitingWardrobeKey(setting, loadout)
+					waitingKeybind = null
+					waitingHotbarSwapKey = null
+					focusedString = null
+					focusedPlayerAlias = null
+					focusedWardrobeLoadout = null
+					focusedSave = null
+					writingSearch = false
+				}
+			})
+
+			val autoX = keyX + 112
+			val checkX = autoX + 60
+			val hovered = Bounds(autoX, fieldY, 78, 19).contains(mouseX.toDouble(), mouseY.toDouble())
+			gfx.text(font(), "Auto close", autoX, fieldY + 6, if (loadout.autoClose) Colours.TEXT else Colours.UNSELECTED_TEXT, false)
+			fill(gfx, checkX, fieldY + 2, checkX + 14, fieldY + 16, if (hovered) Colours.HOVERING_TEXT else Colours.PANEL)
+			drawRectOutline(gfx, checkX, fieldY + 2, 14, 14, Colours.GROUP_OUTLINE)
+			if (loadout.autoClose) fill(gfx, checkX + 3, fieldY + 5, checkX + 11, fieldY + 13, Colours.SELECTED)
+			hitboxes.add(Hitbox(autoX, fieldY, 78, 19) { button ->
+				if (button == 0) {
+					loadout.autoClose = !loadout.autoClose
+					setting.onEdit()
+				}
+			})
+
+			val removeX = row.x + boxWidth - 25
+			drawInputBox(gfx, removeX, fieldY, 18, 19, false)
+			gfx.centeredText(font(), "X", removeX + 9, fieldY + 6, Colours.TEXT)
+			hitboxes.add(Hitbox(removeX, fieldY, 18, 19) { button ->
+				if (button == 0) {
+					setting.removeLoadout(loadout)
+					if (focusedWardrobeLoadout?.loadout?.id == loadout.id) focusedWardrobeLoadout = null
+					if (waitingWardrobeKey?.loadout?.id == loadout.id) waitingWardrobeKey = null
+				}
+			})
+
+			y += WARDROBE_LOADOUT_BOX_HEIGHT + 6
+		}
 	}
 
 	private fun fillMissingHotbarSwapItems(swap: HotbarSwapListSetting.Swap) {
@@ -1369,6 +1592,11 @@ private class RsmStylePanel {
 			} else {
 				SETTING_STEP + setting.value.size * (PLAYER_ALIAS_BOX_HEIGHT + 6)
 			}
+			is WardrobeLoadoutListSetting -> if (setting.value.isEmpty()) {
+				SETTING_STEP
+			} else {
+				SETTING_STEP + setting.value.size * (WARDROBE_LOADOUT_BOX_HEIGHT + 6)
+			}
 			else -> SETTING_STEP
 		}
 
@@ -1385,6 +1613,7 @@ private class RsmStylePanel {
 				writingSearch = false
 				focusedString = null
 				focusedPlayerAlias = null
+				focusedWardrobeLoadout = null
 				focusedSave = null
 				true
 			}
@@ -1531,6 +1760,24 @@ private class RsmStylePanel {
 		val field: PlayerNameAliasListSetting.Field
 	)
 
+	private data class FocusedNumber(
+		val setting: NumberSetting,
+		var text: String,
+		val originalValue: Double,
+		var bounds: Bounds,
+		var selectAll: Boolean
+	)
+
+	private data class FocusedWardrobeLoadout(
+		val setting: WardrobeLoadoutListSetting,
+		val loadout: WardrobeLoadoutListSetting.Loadout
+	)
+
+	private data class WaitingWardrobeKey(
+		val setting: WardrobeLoadoutListSetting,
+		val loadout: WardrobeLoadoutListSetting.Loadout
+	)
+
 	private data class HotbarSwapDropdown(
 		val setting: HotbarSwapListSetting,
 		val swap: HotbarSwapListSetting.Swap,
@@ -1566,8 +1813,11 @@ private class RsmStylePanel {
 		private const val HOTBAR_SWAP_BOX_HEIGHT = 55
 		private const val PLAYER_ALIAS_BOX_WIDTH = 448
 		private const val PLAYER_ALIAS_BOX_HEIGHT = 40
+		private const val WARDROBE_LOADOUT_BOX_WIDTH = 448
+		private const val WARDROBE_LOADOUT_BOX_HEIGHT = 45
 		private const val MODE_OPTION_HEIGHT = 18
 		private const val HOTBAR_TRIGGER_OPTION_HEIGHT = 18
+		private const val NUMBER_INPUT_MAX_LENGTH = 16
 	}
 
 	private object SessionState {
@@ -1636,6 +1886,8 @@ private object Colours {
 	val SCROLL_BAR = argb(255, 67, 67, 67)
 	val ENABLED = argb(13, 255, 255, 255)
 	val ENABLED_TEXT = argb(255, 230, 207, 234)
+	val STATE_ON = argb(255, 37, 133, 74)
+	val STATE_OFF = argb(255, 146, 52, 52)
 	val WRITING_TEXT = argb(255, 60, 60, 60)
 	val HOVERING_TEXT = argb(255, 50, 50, 50)
 	val SEARCH_FILL = argb(255, 50, 50, 50)

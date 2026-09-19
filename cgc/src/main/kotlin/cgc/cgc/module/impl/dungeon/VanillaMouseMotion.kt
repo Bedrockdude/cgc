@@ -18,6 +18,7 @@ internal class VanillaMouseMotion {
 		client: Minecraft,
 		player: LocalPlayer,
 		desired: Rotation,
+		maximumAngularSpeed: Double = DEFAULT_MAX_ANGULAR_SPEED,
 		nowNs: Long = System.nanoTime()
 	): Rotation {
 		if (client.screen != null || !client.mouseHandler.isMouseGrabbed) {
@@ -37,7 +38,7 @@ internal class VanillaMouseMotion {
 		val degreesPerCount = mouseScale * TURN_DEGREES_PER_UNIT
 		val yawError = Mth.wrapDegrees(desired.yaw - player.yRot).toDouble()
 		val pitchError = (desired.pitch.coerceIn(MIN_PITCH, MAX_PITCH) - player.xRot).toDouble()
-		val limited = clampMagnitude(yawError, pitchError, MAX_ANGULAR_SPEED * frameSeconds)
+		val limited = clampMagnitude(yawError, pitchError, maximumAngularSpeed.coerceAtLeast(1.0) * frameSeconds)
 		val yawCounts = rawCounts(limited.first, degreesPerCount)
 		val pitchCounts = rawCounts(limited.second, degreesPerCount)
 
@@ -67,7 +68,7 @@ internal class VanillaMouseMotion {
 		private const val MIN_PITCH = -90.0f
 		private const val MAX_PITCH = 90.0f
 		private const val TURN_DEGREES_PER_UNIT = 0.15
-		private const val MAX_ANGULAR_SPEED = 540.0
+		private const val DEFAULT_MAX_ANGULAR_SPEED = 540.0
 		private const val DEFAULT_FRAME_SECONDS = 1.0 / 60.0
 		private const val MIN_FRAME_SECONDS = 1.0 / 1000.0
 		private const val MAX_FRAME_SECONDS = 1.0 / 20.0

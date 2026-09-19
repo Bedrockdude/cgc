@@ -25,7 +25,7 @@ import net.minecraft.world.phys.Vec3
 class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : AutoPuzzleController {
 	override val roomNames = setOf("Creeper Beams")
 
-	private enum class State { WAITING, AIM_FIRST, AIM_SECOND, WAIT_RESULT, WAIT_GREEN, DONE }
+	private enum class State { WAITING, AIM_FIRST, WAIT_FIRST_FLIGHT, AIM_SECOND, WAIT_RESULT, WAIT_GREEN, DONE }
 	private data class RenderPair(val pair: CreeperBeamSolver.WorldPair, val colorIndex: Int)
 
 	private var state = State.WAITING
@@ -39,7 +39,6 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 	private var pairs = emptyList<CreeperBeamSolver.WorldPair>()
 	private var pairIndex = 0
 	private var attempt = 0
-	private var firstAttemptAtMs = 0L
 	private var resultWaitAtMs = 0L
 	private var aimStartedAtMs = 0L
 	private var aimedPoint: Vec3? = null
@@ -55,7 +54,7 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 	}
 
 	override fun tick(context: AutoPuzzleContext) {
-		val start = AutoPuzzleRoomCoordinates.worldPoint(context.room, 0.5, 75.0, 0.5)
+		val start = AutoPuzzleRoomCoordinates.worldPosition(context.room, 0.5, 75.0, 0.5)
 		renderStartBox = AABB(start.x - 0.5, start.y - 1.0, start.z - 0.5, start.x + 0.5, start.y, start.z + 0.5)
 		if (!CreeperBeamSolver.endpointsLoaded(context)) {
 			renderPairs = emptyList()
@@ -131,10 +130,6 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 			runChanged(context.runSequence)
 			return
 		}
-		if (context.nowMs - firstAttemptAtMs >= PAIR_TOTAL_TIMEOUT_MS && firstAttemptAtMs != 0L) {
-			stop("the current beam pair exceeded the 5 second retry limit", terminal = true)
-			return
-		}
 		val interference = futurePairInterference(context)
 		if (interference != null) {
 			stop(interference, terminal = true)
@@ -143,6 +138,7 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 
 		when (state) {
 			State.AIM_FIRST -> tickAim(context, first = true)
+			State.WAIT_FIRST_FLIGHT -> tickFirstFlight(context)
 			State.AIM_SECOND -> tickAim(context, first = false)
 			State.WAIT_RESULT -> tickResult(context)
 			else -> Unit
@@ -154,12 +150,12 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 		val target = if (first) pair.first else pair.second
 		val bow = shortbow ?: return stop("the selected shortbow is unavailable", terminal = true)
 		val result = ProjectileAimPlanner.block(context, target, bow.terminator, unintendedEndpoints(target))
-		val point = (result as? ProjectileAimPlanner.Result.Safe)?.point
+		val safePoint = (result as? ProjectileAimPlanner.Result.Safe)?.point
 			?: return stop((result as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
-		aimedPoint = point
+		aimedPoint = safePoint
 		aim.start(
 			context,
-			point,
+			safePoint,
 			settings.aimSpeed.value.toDouble(),
 			if (first && attempt == 1 && pairIndex == 0) AutoPuzzleAimProfile.NORMAL else AutoPuzzleAimProfile.CHAINED
 		)
@@ -181,10 +177,11 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 			return stop("the current beam endpoint was no longer untouched before its shot", terminal = true)
 		}
 		val unintended = unintendedEndpoints(target)
-		val result = ProjectileAimPlanner.block(context, target, bow.terminator, unintended)
-		val safe = result as? ProjectileAimPlanner.Result.Safe
-			?: return stop((result as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
-		if (aimedPoint?.distanceToSqr(safe.point)?.let { it > RETARGET_DISTANCE_SQ } == true) {
+		val currentPoint = aimedPoint
+		if (currentPoint == null || !ProjectileAimPlanner.isSafeBlockAimPoint(context, currentPoint, target, bow.terminator, unintended)) {
+			val result = ProjectileAimPlanner.block(context, target, bow.terminator, unintended)
+			val safe = result as? ProjectileAimPlanner.Result.Safe
+				?: return stop((result as ProjectileAimPlanner.Result.Unsafe).reason, terminal = true)
 			aimedPoint = safe.point
 			aim.start(context, safe.point, settings.aimSpeed.value.toDouble(), AutoPuzzleAimProfile.CHAINED)
 		}
@@ -203,11 +200,22 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 		if (!AutoPuzzleInteraction.useHeldItem(context)) return stop("could not fire the shortbow", terminal = true)
 		shotEndpoints.add(target)
 		if (first) {
-			if (firstAttemptAtMs == 0L) firstAttemptAtMs = context.nowMs
-			beginAim(context, first = false)
+			resultWaitAtMs = context.nowMs
+			state = State.WAIT_FIRST_FLIGHT
 		} else {
 			resultWaitAtMs = context.nowMs
 			state = State.WAIT_RESULT
+		}
+	}
+
+	private fun tickFirstFlight(context: AutoPuzzleContext) {
+		if (context.nowMs - resultWaitAtMs < FIRST_ARROW_HOLD_MS) return
+		val pair = pairs.getOrNull(pairIndex) ?: return completeLocalWork()
+		if (CreeperBeamSolver.state(context.level, pair.second) == CreeperBeamSolver.EndpointState.PRISMARINE) {
+			resultWaitAtMs = context.nowMs
+			state = State.WAIT_RESULT
+		} else {
+			beginAim(context, first = false)
 		}
 	}
 
@@ -218,7 +226,6 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 		if (first == CreeperBeamSolver.EndpointState.PRISMARINE && second == CreeperBeamSolver.EndpointState.PRISMARINE) {
 			pairIndex++
 			attempt = 1
-			firstAttemptAtMs = 0L
 			updatedEndpoints.clear()
 			shotEndpoints.clear()
 			if (pairIndex >= pairs.size) completeLocalWork() else beginAim(context, first = true)
@@ -229,23 +236,26 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 			return
 		}
 		if (context.nowMs - resultWaitAtMs < PAIR_RESULT_WAIT_MS) return
-		val changed = listOf(first, second).count { it == CreeperBeamSolver.EndpointState.PRISMARINE }
-		if (changed == 1) {
-			stop("only one endpoint of the current beam pair updated", terminal = true)
-			return
-		}
-		if (updatedEndpoints.isNotEmpty()) {
-			stop("the beam pair received an unconfirmed block update", terminal = true)
-			return
-		}
-		if (attempt >= MAX_PAIR_ATTEMPTS || context.nowMs - firstAttemptAtMs >= PAIR_TOTAL_TIMEOUT_MS) {
-			stop("the current beam pair did not update after three attempts", terminal = true)
+		if (attempt >= MAX_PAIR_ATTEMPTS) {
+			stop("the beam endpoints did not confirm after three shot cycles", terminal = true)
 			return
 		}
 		attempt++
 		updatedEndpoints.clear()
-		shotEndpoints.clear()
-		beginAim(context, first = true)
+		when {
+			first == CreeperBeamSolver.EndpointState.PRISMARINE -> {
+				shotEndpoints.remove(pair.second)
+				beginAim(context, first = false)
+			}
+			second == CreeperBeamSolver.EndpointState.PRISMARINE -> {
+				shotEndpoints.remove(pair.first)
+				beginAim(context, first = true)
+			}
+			else -> {
+				shotEndpoints.clear()
+				beginAim(context, first = true)
+			}
+		}
 	}
 
 	private fun futurePairInterference(context: AutoPuzzleContext): String? {
@@ -291,6 +301,8 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 			CgcRenderer3D.lineList(listOf(pair.first.center, pair.second.center), color, color, depth = false, width = width)
 		}
 	}
+
+	override fun frame(client: Minecraft) = aim.frameUpdate(client)
 
 	private fun pairColor(index: Int): Colour = when (index % 4) {
 		0 -> settings.pair1Color.value
@@ -363,10 +375,9 @@ class CreeperBeamsController(private val settings: CreeperBeamsSubModule) : Auto
 	private companion object {
 		const val START_DISTANCE_SQ = 0.18
 		const val START_Y_TOLERANCE = 0.20
-		const val PAIR_RESULT_WAIT_MS = 500L
-		const val PAIR_TOTAL_TIMEOUT_MS = 5_000L
+		const val FIRST_ARROW_HOLD_MS = 450L
+		const val PAIR_RESULT_WAIT_MS = 1_200L
 		const val MAX_PAIR_ATTEMPTS = 3
 		const val AIM_ACQUISITION_TIMEOUT_MS = 2_000L
-		const val RETARGET_DISTANCE_SQ = 0.0025
 	}
 }

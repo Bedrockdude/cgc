@@ -33,6 +33,38 @@ class CreeperBeamDataTest {
 		assertEquals(ready, assertIs<CreeperBeamSolver.AutomationResult.Ready>(CreeperBeamSolver.selectAutomationPairs(reversed)).pairs)
 	}
 
+	@Test
+	fun `fifth overlapping candidate is discarded when four disjoint pairs are unique`() {
+		val ready = (0..3).map { index -> pair(index, index * 2, index * 2 + 1) }
+		val crossing = pair(4, 8, 9).copy(first = ready[0].first, second = ready[1].first)
+		assertEquals(
+			ready,
+			assertIs<CreeperBeamSolver.AutomationResult.Ready>(
+				CreeperBeamSolver.selectAutomationPairs(ready + crossing)
+			).pairs
+		)
+	}
+
+	@Test
+	fun `five independent candidates use the first four source ordered pairs`() {
+		val candidates = (0..4).map { index -> pair(index, index * 2, index * 2 + 1) }
+		assertEquals(
+			candidates.take(4),
+			assertIs<CreeperBeamSolver.AutomationResult.Ready>(CreeperBeamSolver.selectAutomationPairs(candidates)).pairs
+		)
+	}
+
+	@Test
+	fun `closer candidate is preferred over source order`() {
+		val candidates = (0..4).map { index ->
+			pair(index, index * 2, index * 2 + 1).copy(selectionScore = if (index == 4) -1.0 else index.toDouble())
+		}
+		assertEquals(
+			listOf(candidates[4], candidates[0], candidates[1], candidates[2]),
+			assertIs<CreeperBeamSolver.AutomationResult.Ready>(CreeperBeamSolver.selectAutomationPairs(candidates)).pairs
+		)
+	}
+
 	private fun hash(): String {
 		val bytes = javaClass.classLoader.getResourceAsStream("assets/cgc/autopuzzles/creeperBeamSolutions.json")!!.use { it.readAllBytes() }
 		return MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02X".format(it) }
